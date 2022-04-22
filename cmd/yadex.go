@@ -3,77 +3,109 @@ package main
 import (
 	"context"
 	"flag"
-	"go.mongodb.org/mongo-driver/event"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
-	"log"
-	"time"
+	log "github.com/sirupsen/logrus"
+	"sync"
+	"yadex/config"
+	mongosync "yadex/msync"
 )
 
-// ConnectMongo establishes monitored connection to uri database server.
-// connections state is broadcast by available channel.
-// unless channel returned true there is no possibility to work with the connection
-func ConnectMongo(ctx context.Context, uri string) (client *mongo.Client, available chan bool, err error) {
-	available = make(chan bool)
-	svrMonitor := &event.ServerMonitor{
-		TopologyDescriptionChanged: func(changedEvent *event.TopologyDescriptionChangedEvent) {
-			servers := changedEvent.NewDescription.Servers
-			avail := false
-			for _, server := range servers {
-				if server.AverageRTTSet {
-					avail = true
-				}
-			}
-			available <- avail
-		},
+func createExchanges(ctx context.Context, cfg *config.Config) []*mongosync.MongoSync {
+	var result []*mongosync.MongoSync
+	for _, s := range cfg.Exchange {
+		msync, err := mongosync.NewMongoSync(ctx, &s)
+		if err != nil {
+			log.Errorf("Failed to establish sync with config %+v", msync)
+			continue
+		}
+		result = append(result, msync)
 	}
-	clientOpts := options.Client().ApplyURI(uri).SetServerMonitor(svrMonitor)
-	//clientOpts.SetConnectTimeout(time.Second*5)
-	client, err = mongo.Connect(ctx, clientOpts)
-	return client, available, err
+	return result
 }
 
-func FatalError(context string, err error) {
-	if err == nil {
-		return
-	}
-	log.Fatal(context + ": "+ err.Error())
+var configFileName string
+
+func processCommandLine() {
+	flag.StringVar(&configFileName, "config", "config.yaml", "path to config file")
+	//flag.BoolVar(&fields, "fields", false, "Count difference for each field present in documents (may slow down)")
+	//flag.BoolVar(&verbose, "verbose", false, "Show report including where collections is identical")
+	flag.Parse()
+
 }
 
-func RunExchange(ctx context.Context, senderURI, receiverURI string) {
-	receiver, rcvAvail, err := ConnectMongo(ctx, receiverURI)
-	if err != nil {
-		log.Fatalf("failed to connect to receiver %s : %s", receiverURI, err)
-	}
-	sender, sndAvail, err := ConnectMongo(ctx, senderURI)
-	if err != nil {
-		log.Fatalf("failed to connect to sender %s : %s", senderURI, err)
-	}
-	dex := CreateDEX(sender, receiver)
-	var receiverAvailable, senderAvailable bool
-	dexing:	for {
-		prevCanDex := receiverAvailable && senderAvailable
-		select {
-		case receiverAvailable = <- rcvAvail:
-		case senderAvailable = <- sndAvail:
-		case <-ctx.Done():
-			dex.Stop()
-			break dexing
-		}
-		canDex := receiverAvailable && senderAvailable
-		if prevCanDex == canDex {
-			continue dexing
-		}
-		if receiverAvailable && senderAvailable {
-			dex.Start()
-		} else {
-			dex.Stop()
-		}
-	}
-}
+//func RunExchange(ctx context.Context, senderURI, receiverURI string) {
+//	receiver, rcvAvail, err := ConnectMongo(ctx, receiverURI)
+//	if err != nil {
+//		log.Fatalf("failed to connect to receiver %s : %s", receiverURI, err)
+//	}
+//	sender, sndAvail, err := ConnectMongo(ctx, senderURI)
+//	if err != nil {
+//		log.Fatalf("failed to connect to sender %s : %s", senderURI, err)
+//	}
+//	dex := CreateDEX(sender, receiver)
+//	var receiverAvailable, senderAvailable bool
+//	dexing:	for {
+//		prevCanDex := receiverAvailable && senderAvailable
+//		select {
+//		case receiverAvailable = <- rcvAvail:
+//		case senderAvailable = <- sndAvail:
+//		case <-ctx.Done():
+//			dex.Stop()
+//			break dexing
+//		}
+//		canDex := receiverAvailable && senderAvailable
+//		if prevCanDex == canDex {
+//			continue dexing
+//		}
+//		if receiverAvailable && senderAvailable {
+//			dex.Start()
+//		} else {
+//			dex.Stop()
+//		}
+//	}
+//}
+
+
 
 
 func main() {
-	ctx := context.Background()
-	RunExchange()
+	log.SetReportCaller(true)
+	processCommandLine()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	configChan := config.MakeWatchConfigChannel(ctx, configFileName)
+	var Exchanges []*mongosync.MongoSync
+	var wg sync.WaitGroup
+	stopExchanges := func() {
+		if Exchanges == nil {
+			return
+		}
+		log.Info("Waiting stopping exchanges...")
+		for _, msync := range Exchanges {
+			close(msync.ExchangeAvailable)
+		}
+		wg.Wait()
+	}
+	for cfg := range configChan {
+		// close previous exchanges
+		stopExchanges()
+		// create new exchanges from Cfg
+		Exchanges = createExchanges(ctx, cfg)
+		for _, msync := range Exchanges {
+			wg.Add(1)
+			go func(msync *mongosync.MongoSync) {
+				defer wg.Done()
+				// watch over exchange availability and start/stop exchange depending on it
+				for avail := range msync.ExchangeAvailable {
+					if avail {
+						msync.Start()
+					} else {
+						msync.Stop()
+					}
+				}
+				msync.Stop()
+			}(msync)
+		}
+	}
+	stopExchanges()
+	log.Info("yadex exited gracefully")
 }

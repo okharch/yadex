@@ -13,16 +13,19 @@ import (
 	"math/rand"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
+	"yadex/config"
 )
 
 type (
 	// enum type to define what kind of operation is BulkWriteOp: (OpLogUnknown, OpLogUnordered, OpLogOrdered, OpLogDrop, OpLogCloneCollection)
 	OpLogType = int
 	// this is postponed operation of modification which is put into prioritized channel
-	// it arrives as an input for goroutine inside GetBulkWriteOpChan(), see switch there to find out how it is processed
+	// it arrives as an input for goroutine inside GetBulkWriteOp(), see switch there to find out how it is processed
 	BulkWriteOp struct {
 		Coll   string
+		RealTime bool
 		OpType OpLogType
 		SyncId string
 		Models []mongo.WriteModel
@@ -40,15 +43,26 @@ const (
 
 var allRecords = bson.D{} // used for filter parameter where there is no need to filter
 
-// GetBulkWriteOpChan returns write-only channel for BulkWrite operations
-// it launches goroutine which pops operation from that channel and
+// GetBulkWriteOp returns function to add bulkWrite operation to buffered channel
+// it launches goroutine which serves  operation from that channel and
 // 1. sends bulkWrites to receiver mongodb
 // 2. stores sync_id into bookmarkCollSyncId for the collection on successful sync operation
-func GetBulkWriteOpChan(ctx context.Context, receiver *mongo.Database, bookmarkCollSyncId *mongo.Collection) chan<- BulkWriteOp {
-	ch := make(chan BulkWriteOp)
+func (ms *MongoSync) GetBulkWriteOp() func (bwOp *BulkWriteOp)  {
+	bwChan := make(chan *BulkWriteOp, 3)
+	ctx := ms.ctx
+	// WaitGroup is used to implement privileged access to BulkWriteOp channel for RT ops vs ST
+	// it counts how many ops were put into channel
+	// ST ops always wait before  channel is empty and only then puts itself into channel
+	var wg sync.WaitGroup
+	// this mutex needed to avoid two or more separate ST detects that channel is empty.
+	// before waiting, it Locks and after wg.Add(1) it unlocks so
+	// next ST will be waiting until channel is empty again
+	var wgMu sync.Mutex // need for exclusive wait when ST op invoked
+	// this goroutine serves BulkWriteOp channel
 	go func() {
-		for bwOp := range ch {
-			coll := receiver.Collection(bwOp.Coll)
+		for bwOp := range bwChan {
+			wg.Done()
+			coll := ms.Receiver.Collection(bwOp.Coll)
 			if bwOp.OpType == OpLogDrop {
 				log.Tracef("drop Receiver.%s", bwOp.Coll)
 				if err := coll.Drop(ctx); err != nil {
@@ -60,7 +74,7 @@ func GetBulkWriteOpChan(ctx context.Context, receiver *mongo.Database, bookmarkC
 				if len(bwOp.Models) > 0 {
 					r, err := coll.BulkWrite(ctx, bwOp.Models, optOrdered)
 					if err != nil {
-						log.Errorf("Connection lost to %s: %s", receiver.Name(), err)
+						log.Errorf("Connection lost to %s: %s", ms.Receiver.Name(), err)
 					}
 					if err != nil {
 						if ordered || !mongo.IsDuplicateKeyError(err) {
@@ -78,7 +92,7 @@ func GetBulkWriteOpChan(ctx context.Context, receiver *mongo.Database, bookmarkC
 				id := bson.E{Key: "_id", Value: bwOp.Coll}
 				filter := bson.D{id}
 				doc := bson.D{id, {Key: "sync_id", Value: bwOp.SyncId}}
-				if r, err := bookmarkCollSyncId.ReplaceOne(ctx, filter, doc, optUpsert); err != nil {
+				if r, err := ms.CollSyncId.ReplaceOne(ctx, filter, doc, optUpsert); err != nil {
 					log.Warnf("failed to update sync_id for coll %s: %s", bwOp.Coll, err)
 				} else {
 					log.Tracef("Coll %s %d sync_id %s", bwOp.Coll, r.UpsertedCount, bwOp.SyncId)
@@ -86,7 +100,24 @@ func GetBulkWriteOpChan(ctx context.Context, receiver *mongo.Database, bookmarkC
 			}
 		}
 	}()
-	return ch
+	// returns putBWOp func which closes bwChan if bwOp is nil,
+	// otherwise puts bwOp RT or ST operation
+	// for ST operation makes sure bwChan is empty
+	return func(bwOp *BulkWriteOp) {
+		if bwOp == nil {
+			close(bwChan)
+			return
+		}
+		if !bwOp.RealTime {
+			wgMu.Lock()
+			wg.Wait() // wait until channel is clean
+			wg.Add(1)
+			wgMu.Unlock()
+		} else {
+			wg.Add(1)
+		}
+		bwChan <- bwOp
+	}
 }
 
 // getCollChan returns channel of Oplog for the coll collection.
@@ -375,7 +406,7 @@ type MongoSync struct {
 	senderClient, receiverClient *mongo.Client
 	ExchangeAvailable            chan bool
 	Sender, Receiver             *mongo.Database
-	Config                       *SyncConfig
+	Config                       *config.ExchangeConfig
 	CollSyncId                   *mongo.Collection
 }
 
@@ -406,9 +437,9 @@ func ConnectMongo(ctx context.Context, uri string) (client *mongo.Client, availa
 // collection stores last sync_id for each individual collection being synced - so it can resume sync from that point
 const CollSyncIdDbName = "mongoSync"
 
-func NewMongoSync(ctx context.Context, config *SyncConfig) (*MongoSync, error) {
+func NewMongoSync(ctx context.Context, exchCfg *config.ExchangeConfig) (*MongoSync, error) {
 	var r MongoSync
-	r.Config = config
+	r.Config = exchCfg
 	senderClient, senderAvailable, err := ConnectMongo(ctx, r.Config.SenderURI)
 	if err != nil {
 		return nil, fmt.Errorf("failed to establish client for sender: %w", err)
@@ -440,12 +471,12 @@ func NewMongoSync(ctx context.Context, config *SyncConfig) (*MongoSync, error) {
 			r.ExchangeAvailable <- senderAvail && receiverAvail
 		}
 	}()
-	r.ctx, r.cancelFunc = context.WithCancel(context.Background())
+	r.ctx, r.cancelFunc = context.WithCancel(ctx)
 	return &r, nil
 }
 
-// Start launches syncronization between sender and receiver based on SyncConfig configuration.
-// Use cancel (ctx) func to stop syncronization
+// Start launches synchronization between sender and receiver based on SyncConfig configuration.
+// Use cancel (ctx) func to stop synchronization
 func (ms *MongoSync) Start() {
 	ctx := ms.ctx
 	for delay := time.Duration(0); ctx.Err() == nil; delay = ms.Run() {
@@ -459,7 +490,7 @@ func (ms *MongoSync) Start() {
 
 func (ms *MongoSync) Run() (delay time.Duration) {
 	ctx := ms.ctx
-	opBW := GetBulkWriteOpChan(ctx, ms.Receiver, ms.CollSyncId)
+	opBW := ms.GetBulkWriteOp()
 	c := ms.Config
 	colPriorityFunc, countPriority := GetCollPriority(c)
 	chBulkWriteOps := GetPrioritizedChan(ctx, countPriority, opBW)
