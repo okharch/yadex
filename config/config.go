@@ -12,23 +12,24 @@ import (
 )
 
 type (
-	DataSync struct{
-		Delay int // max delay before flush
-		Batch int // max size before flush
-		Exclude string // Regexp of colls to exclude
+	DataSync struct {
+		Delay   int64    // max delay before flush
+		Batch   int64    // max size before flush
+		Exclude []string // Regexp of colls to exclude
 	}
-	ExchangeConfig       struct {
-		SenderURI    string
-		SenderDB     string
-		ReceiverURI  string
-		ReceiverDB   string
-		RT map[string] *DataSync
-		ST map[string] *DataSync
+	ExchangeConfig struct {
+		SenderURI   string
+		SenderDB    string
+		ReceiverURI string
+		ReceiverDB  string
+		RT          map[string]*DataSync
+		ST          map[string]*DataSync
 	}
 	Config struct {
-		Exchange []	*ExchangeConfig
+		Exchanges []*ExchangeConfig
 	}
 )
+
 func ReadConfig(configFile string) (*Config, error) {
 	data, err := os.ReadFile(configFile)
 	if err != nil {
@@ -48,7 +49,7 @@ func ReadConfig(configFile string) (*Config, error) {
 // normal reaction implies to stop objects that depends on config, recreate them and rerun
 // if parent context is done, it closes the channel
 // also it listens to os.Interrupt signal. If it occurs it closes the channel
-func MakeWatchConfigChannel(ctx context.Context, configFileName string) chan *config.Config {
+func MakeWatchConfigChannel(ctx context.Context, configFileName string) chan *Config {
 	configChan := make(chan *Config)
 	go func() {
 		defer close(configChan)
@@ -99,6 +100,3 @@ func MakeWatchConfigChannel(ctx context.Context, configFileName string) chan *co
 	}()
 	return configChan
 }
-
-
-
