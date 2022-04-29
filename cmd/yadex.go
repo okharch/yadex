@@ -11,8 +11,8 @@ import (
 
 func createExchanges(ctx context.Context, cfg *config.Config) []*mongosync.MongoSync {
 	var result []*mongosync.MongoSync
-	for _, s := range cfg.Exchange {
-		msync, err := mongosync.NewMongoSync(ctx, &s)
+	for _, s := range cfg.Exchanges {
+		msync, err := mongosync.NewMongoSync(ctx, s)
 		if err != nil {
 			log.Errorf("Failed to establish sync with config %+v", msync)
 			continue
@@ -29,43 +29,7 @@ func processCommandLine() {
 	//flag.BoolVar(&fields, "fields", false, "Count difference for each field present in documents (may slow down)")
 	//flag.BoolVar(&verbose, "verbose", false, "Show report including where collections is identical")
 	flag.Parse()
-
 }
-
-//func RunExchange(ctx context.Context, senderURI, receiverURI string) {
-//	receiver, rcvAvail, err := ConnectMongo(ctx, receiverURI)
-//	if err != nil {
-//		log.Fatalf("failed to connect to receiver %s : %s", receiverURI, err)
-//	}
-//	sender, sndAvail, err := ConnectMongo(ctx, senderURI)
-//	if err != nil {
-//		log.Fatalf("failed to connect to sender %s : %s", senderURI, err)
-//	}
-//	dex := CreateDEX(sender, receiver)
-//	var receiverAvailable, senderAvailable bool
-//	dexing:	for {
-//		prevCanDex := receiverAvailable && senderAvailable
-//		select {
-//		case receiverAvailable = <- rcvAvail:
-//		case senderAvailable = <- sndAvail:
-//		case <-ctx.Done():
-//			dex.Stop()
-//			break dexing
-//		}
-//		canDex := receiverAvailable && senderAvailable
-//		if prevCanDex == canDex {
-//			continue dexing
-//		}
-//		if receiverAvailable && senderAvailable {
-//			dex.Start()
-//		} else {
-//			dex.Stop()
-//		}
-//	}
-//}
-
-
-
 
 func main() {
 	log.SetReportCaller(true)
@@ -85,6 +49,7 @@ func main() {
 		}
 		wg.Wait()
 	}
+	// here we watch for changes in config and restarting exchanges
 	for cfg := range configChan {
 		// close previous exchanges
 		stopExchanges()
