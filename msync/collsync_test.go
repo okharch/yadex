@@ -71,20 +71,17 @@ func TestSyncCollection(t *testing.T) {
 // 2. sync to the receiver
 // 3. insert another 1000 records
 // 4. sync to the receiver. This time it should be 1000 records copied, not 2000
-func TestSyncCollection2Steps(t *testing.T) {
+func TestSyncCollectionMultiple(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.TODO())
 	ms, err := NewMongoSync(ctx, ExchCfg)
 	require.NoError(t, err)
 	const collName = "test"
-	const numDocs = int64(1000)
+	const numDocs = int64(100000)
 	av := <-ms.ExchangeAvailable
 	require.True(t, av)
 	coll := ms.Sender.Collection(collName)
 	err = coll.Drop(ctx)
 	require.NoError(t, err)
-	res, err := coll.InsertMany(ctx, CreateDocs(1, numDocs))
-	require.NoError(t, err)
-	require.Equal(t, numDocs, int64(len(res.InsertedIDs)))
 	//mIds := Ids2Map(res.InsertedIDs)
 	var wg sync.WaitGroup
 	receiverColl := ms.Receiver.Collection(collName)
@@ -97,24 +94,19 @@ func TestSyncCollection2Steps(t *testing.T) {
 		return &wg
 	}
 
-	err = syncCollection(ctx, ms.Sender, ms.Receiver, "test", 100, putOp)
-	require.NoError(t, err)
+	for i := int64(0); i <= 3; i++ {
+		// insert another 1000
+		res, err := coll.InsertMany(ctx, CreateDocs(numDocs*i+1, numDocs))
+		require.NoError(t, err)
+		require.Equal(t, numDocs, int64(len(res.InsertedIDs)))
+		err = syncCollection(ctx, ms.Sender, ms.Receiver, "test", 100, putOp)
+		require.NoError(t, err)
+		// check all records inserted
+		c, err := receiverColl.CountDocuments(ctx, bson.D{})
+		require.NoError(t, err)
+		require.Equal(t, numDocs*(i+1), c)
+	}
 
-	// check all records inserted
-	c, err := receiverColl.CountDocuments(ctx, bson.D{})
-	require.NoError(t, err)
-	require.Equal(t, numDocs, c)
-
-	// insert another 1000
-	res, err = coll.InsertMany(ctx, CreateDocs(numDocs+1, numDocs))
-	require.NoError(t, err)
-	require.Equal(t, numDocs, int64(len(res.InsertedIDs)))
-	err = syncCollection(ctx, ms.Sender, ms.Receiver, "test", 100, putOp)
-	require.NoError(t, err)
-	// check all records inserted
-	c, err = receiverColl.CountDocuments(ctx, bson.D{})
-	require.NoError(t, err)
-	require.Equal(t, numDocs*2, c)
 	cancel()
 	ms.WaitDone.Wait()
 }

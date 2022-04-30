@@ -80,6 +80,7 @@ func syncCollection(ctx context.Context, sender, receiver *mongo.Database, collN
 	}
 	flush()
 	wg.Wait()
+	log.Infof("sync of %s completed", collName)
 	return ctx.Err()
 }
 
