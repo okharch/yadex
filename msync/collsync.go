@@ -30,11 +30,9 @@ func fetchIds(ctx context.Context, coll *mongo.Collection) []interface{} {
 }
 
 // syncCollection
-// 1. insert all the docs with creationTime > lastSyncTime or creationTime is null unordered
-// 2. update all the docs with lastTimeModifed > creationTime & lastSyncTime
-// 3. compare all the docs without lastTimeModifed and sy
-func syncCollection(ctx context.Context, sender, receiver *mongo.Database, collName string, maxBulkCount int64,
-	putOp putBulkWriteOp) error {
+// insert all the docs from sender but those which _ids found at receiver
+func syncCollection(ctx context.Context, sender, receiver *mongo.Database,
+	collName string, maxBulkCount int64, putOp putBulkWriteOp) error {
 	log.Infof("cloning collection %s...", collName)
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -84,10 +82,12 @@ func syncCollection(ctx context.Context, sender, receiver *mongo.Database, collN
 	return ctx.Err()
 }
 
-// SyncCollections checks for all collections from database whether they should be synced at all using delay != -1 flag
-// then it fetches all _ids from the receivers's collection to avoid resending records with those ids
-// before sending all new records to sender it remembers syncId for the collection at sender
-// it returns nil if it was able to clone all the other collections successfuly into chBulkWriteOps channels
+// SyncCollections checks for all collections from database
+// whether they should be synced at all using delay != -1 flag
+// Then before calling syncCollection for a collection it remembers last SyncId,
+// so it can start dealing with oplog starting with that Id
+// it returns nil if it was able to clone all the collections
+// successfully into chBulkWriteOps channels
 func SyncCollections(ctx context.Context, collMatch CollMatch, collSyncStartFrom map[string]string, sender, receiver *mongo.Database,
 	putOp putBulkWriteOp) error {
 	// here we clone those collections which does not have sync_id
@@ -101,7 +101,7 @@ func SyncCollections(ctx context.Context, collMatch CollMatch, collSyncStartFrom
 		if delay == -1 || rt {
 			continue
 		}
-		// we copy only ST collections
+		// we copy only ST collections which do not have a bookmark in collSyncStartFrom
 		if _, ok := collSyncStartFrom[coll]; !ok {
 			lastSyncId, err := getLastSyncId(ctx, sender)
 			if err != nil {

@@ -218,9 +218,10 @@ func fetchCollSyncId(ctx context.Context, bookmarkCollSyncId *mongo.Collection) 
 }
 
 // resumeOplog finds out minimal sync_id from collMSync collection.
-// It tries to resume from that id.
+// which it can successfully resume oplog watch.
 // it returns collSyncId map for all collections that has greater sync_id.
-// if it fails to resume from any stored sync_id it starts from current oplog and returns empty collSyncId
+// if it fails to resume from any stored sync_id it starts from current oplog
+// and returns empty collSyncId
 func resumeOplog(ctx context.Context, sender *mongo.Database, bookmarkCollSyncId *mongo.Collection) (oplog Oplog, collSyncId map[string]string, err error) {
 	csBookmarks, err := fetchCollSyncId(ctx, bookmarkCollSyncId)
 	if ctx.Err() != nil {
@@ -475,7 +476,7 @@ func (ms *MongoSync) Run() (delay time.Duration) {
 		log.Errorf("Can't resume oplog: %s", err)
 		return
 	}
-	// clone collections which we don't have bookmarks for restore syncing
+	// clone collections which we don't have bookmarks for restoring syncing using oplog
 	if err := SyncCollections(ctx, collMatch, collSyncId, ms.Sender, ms.Receiver, opBW); err != nil {
 		log.Errorf("failed to copy collections: %s, waiting for another chance", err)
 		return
