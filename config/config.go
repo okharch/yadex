@@ -13,8 +13,8 @@ import (
 
 type (
 	DataSync struct {
-		Delay   int64    // max delay before flush
-		Batch   int64    // max size before flush
+		Delay   int      // max delay before flush
+		Batch   int      // max size before flush
 		Exclude []string // Regexp of colls to exclude
 	}
 	ExchangeConfig struct {

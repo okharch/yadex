@@ -32,14 +32,14 @@ func fetchIds(ctx context.Context, coll *mongo.Collection) []interface{} {
 // syncCollection
 // insert all the docs from sender but those which _ids found at receiver
 func syncCollection(ctx context.Context, sender, receiver *mongo.Database,
-	collName string, maxBulkCount int64, putOp putBulkWriteOp) error {
+	collName string, maxBulkCount int, putOp putBulkWriteOp) error {
 	log.Infof("cloning collection %s...", collName)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 	var wg *sync.WaitGroup
 	models := make([]mongo.WriteModel, maxBulkCount)
-	count := int64(0)
+	count := 0
 	flush := func() {
 		if count == 0 {
 			return

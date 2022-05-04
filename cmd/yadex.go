@@ -10,17 +10,15 @@ import (
 	mongosync "yadex/msync"
 )
 
-func createExchanges(ctx context.Context, cfg *config.Config, wg *sync.WaitGroup) []*mongosync.MongoSync {
-	var result []*mongosync.MongoSync
+func createExchanges(ctx context.Context, cfg *config.Config, waitExchanges *sync.WaitGroup) {
 	for _, s := range cfg.Exchanges {
-		msync, err := mongosync.NewMongoSync(ctx, s, wg)
+		ms, err := mongosync.NewMongoSync(ctx, s, waitExchanges)
 		if err != nil {
-			log.Errorf("Failed to establish sync with config %+v", msync)
+			log.Errorf("Failed to establish sync %s", ms.Name())
 			continue
 		}
-		result = append(result, msync)
+		log.Infof("running exchange %s...", ms.Name())
 	}
-	return result
 }
 
 var configFileName string
@@ -38,27 +36,26 @@ func processCommandLine() {
 func main() {
 	log.SetReportCaller(true)
 	processCommandLine()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	configChan := config.MakeWatchConfigChannel(ctx, configFileName)
-	var Exchanges []*mongosync.MongoSync
+	var ctx context.Context
+	var cancel context.CancelFunc
 	var waitExchanges sync.WaitGroup
 	stopExchanges := func() {
-		if Exchanges == nil {
+		if ctx == nil {
 			return
 		}
 		log.Info("wait stopping exchanges...")
-		for _, msync := range Exchanges {
-			close(msync.ExchangeAvailable)
-		}
+		cancel()
 		waitExchanges.Wait()
 	}
 	// here we watch for changes in config and restarting exchanges
+	// configChan gets closed on os.Interrupt signal
+	configChan := config.MakeWatchConfigChannel(ctx, configFileName)
 	for cfg := range configChan {
 		// close previous exchanges
 		stopExchanges()
 		// create new exchanges from Cfg
-		Exchanges = createExchanges(ctx, cfg, &waitExchanges)
+		ctx, cancel = context.WithCancel(context.Background())
+		createExchanges(ctx, cfg, &waitExchanges)
 	}
 	stopExchanges()
 	log.Info("yadex exited gracefully")

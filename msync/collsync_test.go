@@ -26,12 +26,12 @@ func CreateDocs(start, numRecs int64) []interface{} {
 
 func TestNewMongoSync(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.TODO())
-	ms, err := NewMongoSync(ctx, ExchCfg)
+	var waitSync sync.WaitGroup
+	ms, err := NewMongoSync(ctx, ExchCfg, &waitSync)
 	require.NoError(t, err)
-	av := <-ms.ExchangeAvailable
-	require.True(t, av)
+	require.NotNil(t, ms)
 	cancel()
-	ms.WaitDone.Wait()
+	waitSync.Wait()
 }
 
 // TestSyncCollection simple test which
@@ -40,12 +40,12 @@ func TestNewMongoSync(t *testing.T) {
 // 3. checks 1000 records delivered
 func TestSyncCollection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.TODO())
-	ms, err := NewMongoSync(ctx, ExchCfg)
+	var waitSync sync.WaitGroup
+	ms, err := NewMongoSync(ctx, ExchCfg, &waitSync)
 	require.NoError(t, err)
+	require.NotNil(t, ms)
 	const collName = "test"
 	const numDocs = int64(1000)
-	av := <-ms.ExchangeAvailable
-	require.True(t, av)
 	coll := ms.Sender.Collection(collName)
 	err = coll.Drop(ctx)
 	require.NoError(t, err)
@@ -63,7 +63,7 @@ func TestSyncCollection(t *testing.T) {
 	err = syncCollection(ctx, ms.Sender, ms.Receiver, "test", 100, putOp)
 	require.NoError(t, err)
 	cancel()
-	ms.WaitDone.Wait()
+	waitSync.Wait()
 }
 
 // TestSyncCollection2Steps test
@@ -73,12 +73,13 @@ func TestSyncCollection(t *testing.T) {
 // 4. sync to the receiver. This time it should be 1000 records copied, not 2000
 func TestSyncCollectionMultiple(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.TODO())
-	ms, err := NewMongoSync(ctx, ExchCfg)
+	var waitSync sync.WaitGroup
+	ms, err := NewMongoSync(ctx, ExchCfg, &waitSync)
+	require.NoError(t, err)
+	require.NotNil(t, ms)
 	require.NoError(t, err)
 	const collName = "test"
 	const numDocs = int64(100000)
-	av := <-ms.ExchangeAvailable
-	require.True(t, av)
 	coll := ms.Sender.Collection(collName)
 	err = coll.Drop(ctx)
 	require.NoError(t, err)
@@ -108,5 +109,5 @@ func TestSyncCollectionMultiple(t *testing.T) {
 	}
 
 	cancel()
-	ms.WaitDone.Wait()
+	waitSync.Wait()
 }

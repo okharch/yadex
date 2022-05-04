@@ -8,11 +8,11 @@ import (
 )
 
 type DataSyncCompiled struct {
-	Delay, Batch int64
+	Delay, Batch int
 	Exclude      []*regexp.Regexp
 }
 type collMatchEntry struct {
-	Delay, Batch int64
+	Delay, Batch int
 	rt           bool
 }
 type collMatch []struct {
@@ -56,7 +56,7 @@ func compileRegexps(m map[string]*config.DataSync) collMatch {
 // findEntry iterates over collMatch to match collName against collMatch[i].RegExp
 // it returns -1,-1 if the match has not been found
 // otherwsie it returns (Max)Delay and (Max)Batch for the collection
-func findEntry(cms collMatch, collName []byte) (delay, batch int64) {
+func findEntry(cms collMatch, collName []byte) (delay, batch int) {
 nextMatch:
 	for _, cm := range cms {
 		if cm.re.Match(collName) {
@@ -71,7 +71,7 @@ nextMatch:
 	return -1, -1
 }
 
-type CollMatch func(coll string) (Delay, Batch int64, realtime bool)
+type CollMatch func(coll string) (Delay, Batch int, realtime bool)
 
 // GetCollMatch returns CollMatch func which returns Delay, Batch, realtime params for the collection
 // it's behaviour is defined by configuration
@@ -82,7 +82,7 @@ func GetCollMatch(c *config.ExchangeConfig) CollMatch {
 	st := compileRegexps(c.ST)
 	collEntry := make(map[string]collMatchEntry)
 	var collEntryMutex sync.RWMutex
-	return func(coll string) (Delay, Batch int64, realtime bool) {
+	return func(coll string) (Delay, Batch int, realtime bool) {
 		// try cache first
 		collEntryMutex.RLock()
 		ce, ok := collEntry[coll]
