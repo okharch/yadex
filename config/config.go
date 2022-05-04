@@ -49,11 +49,13 @@ func ReadConfig(configFile string) (*Config, error) {
 // normal reaction implies to stop objects that depends on config, recreate them and rerun
 // if parent context is done, it closes the channel
 // also it listens to os.Interrupt signal. If it occurs it closes the channel
+var osSignal chan os.Signal
+
 func MakeWatchConfigChannel(ctx context.Context, configFileName string) chan *Config {
 	configChan := make(chan *Config)
 	go func() {
 		defer close(configChan)
-		osSignal := make(chan os.Signal, 1)
+		osSignal = make(chan os.Signal, 1)
 		signal.Notify(osSignal, os.Interrupt)
 		signal.Notify(osSignal, syscall.SIGHUP) // reload config
 		// watch file configFileName and Ctrl+C signal. Close channel on Ctrl+C
@@ -81,12 +83,13 @@ func MakeWatchConfigChannel(ctx context.Context, configFileName string) chan *Co
 				return
 			case sig := <-osSignal:
 				if sig == syscall.SIGHUP {
+					log.Info("Rereading config on SIGHUP signal...")
 					rereadConfig()
 					continue
 				}
 				log.Info("Gracefully handling Ctrl+C signal...")
 				return
-			case <-time.After(time.Second):
+			case <-time.After(time.Second * 2):
 				stat, err := os.Stat(configFileName)
 				if err != nil {
 					if reportError {
@@ -99,6 +102,7 @@ func MakeWatchConfigChannel(ctx context.Context, configFileName string) chan *Co
 				if oldTime == stat.ModTime() {
 					continue
 				}
+				log.Info("Rereading config as file has been updated...")
 				rereadConfig()
 			}
 		}

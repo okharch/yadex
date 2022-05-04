@@ -7,12 +7,12 @@ import (
 	"os"
 	"sync"
 	"yadex/config"
-	mongosync "yadex/msync"
+	msync "yadex/msync"
 )
 
 func createExchanges(ctx context.Context, cfg *config.Config, waitExchanges *sync.WaitGroup) {
 	for _, s := range cfg.Exchanges {
-		ms, err := mongosync.NewMongoSync(ctx, s, waitExchanges)
+		ms, err := msync.NewMongoSync(ctx, s, waitExchanges)
 		if err != nil {
 			log.Errorf("Failed to establish sync %s", ms.Name())
 			continue

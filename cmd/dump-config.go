@@ -20,12 +20,12 @@ func main() {
 				ReceiverDB:  "IonM",
 				RT: map[string]*config.DataSync{"realtime": {
 					Delay:   100,
-					Batch:   500,
+					Batch:   100,
 					Exclude: nil,
 				},
 				},
 				ST: map[string]*config.DataSync{".*": {
-					Delay:   100,
+					Delay:   1000,
 					Batch:   500,
 					Exclude: []string{"realtime"},
 				},
