@@ -18,20 +18,8 @@ import (
 	"yadex/config"
 )
 
-type (
-	// enum type to define what kind of operation is BulkWriteOp: (OpLogUnknown, OpLogUnordered, OpLogOrdered, OpLogDrop, OpLogCloneCollection)
-	OpLogType = int
-	// this is postponed operation of modification which is put into prioritized channel
-	// it arrives as an input for goroutine inside getBulkWriteOp(), see switch there to find out how it is processed
-	BulkWriteOp struct {
-		Coll     string
-		RealTime bool
-		OpType   OpLogType
-		SyncId   string
-		Models   []mongo.WriteModel
-	}
-	Oplog = <-chan bson.Raw
-)
+// OpLogType enums what kind of operation is BulkWriteOp: (OpLogUnknown, OpLogUnordered, OpLogOrdered, OpLogDrop)
+type OpLogType = int
 
 // enum OpLogType
 const (
@@ -40,6 +28,17 @@ const (
 	OpLogOrdered                    // don't use unordered option, default ordered is true
 	OpLogDrop                       // indicates current operation is drop
 )
+
+// BulkWriteOp describes postponed (bulkWrite) operation of modification which is sent to the receiver
+type BulkWriteOp struct {
+	Coll     string
+	RealTime bool
+	OpType   OpLogType
+	SyncId   string
+	Models   []mongo.WriteModel
+}
+
+type Oplog = <-chan bson.Raw
 
 var allRecords = bson.D{} // used for filter parameter where there is no need to filter
 
@@ -131,82 +130,6 @@ func (ms *MongoSync) getBulkWriteOp() putBulkWriteOp {
 		bwChan <- bwOp
 		return &ChanBusy
 	}
-}
-
-// getCollChan returns channel of Oplog for the collection.
-// it launches goroutine which pops operation from that channel and flushes BulkWriteOp using putBWOp func
-func getCollChan(collName string, maxDelay, maxBatch int64, realtime bool, putBWOp putBulkWriteOp) chan<- bson.Raw {
-	in := make(chan bson.Raw)
-	// buffer for BulkWrite
-	var models []mongo.WriteModel
-	var lastOpType OpLogType
-	var lastOp bson.Raw
-	flushTimer, ftCancel := context.WithCancel(context.Background())
-	// flush bulkWrite models or drop operation into BulkWrite channel
-	flush := func() {
-		ftCancel()
-		if len(models) == 0 && lastOpType != OpLogDrop { // no op
-			return
-		}
-		syncId := getSyncId(lastOp)
-		bwOp := &BulkWriteOp{Coll: collName, RealTime: realtime, OpType: lastOpType, SyncId: syncId}
-		if lastOpType != OpLogDrop {
-			bwOp.Models = models
-		}
-		models = nil
-		putBWOp(bwOp)
-	}
-	// process channel of Oplog, collects similar operation to batches, flushing them to bulkWriteChan
-	go func() { // oplog for collection
-		defer ftCancel()
-		for op := range in { // oplog
-			if op == nil {
-				// this is from timer (go <-time.After(maxDelay))
-				// look below at case <-time.After(time.Millisecond * time.Duration(maxDelay)):
-				flush()
-				continue
-			}
-			opType, writeModel := getWriteModel(op)
-			// decide whether we need to flush before we can continue
-			switch opType {
-			case OpLogOrdered, OpLogUnordered:
-				if lastOpType != opType {
-					flush()
-				}
-			case OpLogDrop:
-				models = nil
-				lastOp = op
-				lastOpType = opType
-				flush()
-				continue
-			case OpLogUnknown: // ignore op
-				log.Warnf("Operation of unknown type left unhandled:%+v", op)
-				continue
-			}
-			lastOpType = opType
-			lastOp = op
-			models = append(models, writeModel)
-			if len(models) >= int(maxBatch) {
-				flush()
-			} else if len(models) == 1 {
-				// we just put 1st item, set timer to flush after maxDelay
-				// unless it is filled up to (max)maxBatch items
-				ftCancel()
-				flushTimer, ftCancel = context.WithCancel(context.Background())
-				go func() {
-					select {
-					case <-flushTimer.Done():
-						// we have done flush before maxDelay, so no need to flush after timer expires
-						return
-					case <-time.After(time.Millisecond * time.Duration(maxDelay)):
-						ftCancel()
-						in <- nil // flush() without lock
-					}
-				}()
-			}
-		}
-	}()
-	return in
 }
 
 // fetchCollSyncId fetches sorted by sync_id list of docs (collName, sync_id)
@@ -363,10 +286,9 @@ type MongoSync struct {
 	ctx        context.Context
 	cancelFunc context.CancelFunc
 	//senderClient, receiverClient *mongo.Client
-	ExchangeAvailable chan bool
-	Sender, Receiver  *mongo.Database
-	Config            *config.ExchangeConfig
-	CollSyncId        *mongo.Collection
+	Sender, Receiver *mongo.Database
+	Config           *config.ExchangeConfig
+	CollSyncId       *mongo.Collection
 }
 
 // ConnectMongo establishes monitored connection to uri database server.
@@ -407,7 +329,7 @@ func ConnectMongo(ctx context.Context, uri string) (client *mongo.Client, availa
 // collection stores last sync_id for each individual collection being synced - so it can resume sync from that point
 const CollSyncIdDbName = "mongoSync"
 
-func NewMongoSync(ctx context.Context, exchCfg *config.ExchangeConfig, wg *sync.WaitGroup) (*MongoSync, error) {
+func NewMongoSync(ctx context.Context, exchCfg *config.ExchangeConfig, waitExchanges *sync.WaitGroup) (*MongoSync, error) {
 	r := &MongoSync{}
 	r.Config = exchCfg
 	log.Infof("Establishing exchange %s...", r.Name())
@@ -428,34 +350,33 @@ func NewMongoSync(ctx context.Context, exchCfg *config.ExchangeConfig, wg *sync.
 	}
 	r.Receiver = receiverClient.Database(r.Config.ReceiverDB)
 	log.Infof("Sucessfully connected to sender's DB at %s", r.Config.SenderURI)
-	r.ExchangeAvailable = make(chan bool, 1)
-	r.ExchangeAvailable <- true
-	wg.Add(1)
+	waitExchanges.Add(1)
 	go func() {
-		defer wg.Done()
+		defer waitExchanges.Done()
 		senderAvail := true
 		receiverAvail := true
 		exAvail := true
+		oldAvail := false
 		for {
-			if exAvail {
-				r.Start(ctx)
-			} else {
-				r.Stop()
+			if oldAvail != exAvail {
+				log.Infof("senderAvail:%v, ReceiverAvail:%v", senderAvail, receiverAvail)
+				if exAvail {
+					r.Start(ctx)
+				} else {
+					r.Stop()
+				}
+				oldAvail = exAvail
 			}
 			select {
 			case <-ctx.Done():
+				ctx := context.TODO()
 				_ = senderClient.Disconnect(ctx)
 				_ = receiverClient.Disconnect(ctx)
-				close(r.ExchangeAvailable)
 				return
 			case senderAvail = <-senderAvailable:
 			case receiverAvail = <-receiverAvailable:
 			}
-			if exAvail != senderAvail && receiverAvail {
-				log.Infof("senderAvail:%v, ReceiverAvail:%v", senderAvail, receiverAvail)
-				exAvail = senderAvail && receiverAvail
-				r.ExchangeAvailable <- exAvail
-			}
+			exAvail = senderAvail && receiverAvail
 		}
 	}()
 	return r, nil
