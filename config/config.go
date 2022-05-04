@@ -74,6 +74,7 @@ func MakeWatchConfigChannel(ctx context.Context, configFileName string) chan *Co
 			configChan <- cfg
 		}
 		rereadConfig()
+		reportError := true
 		for {
 			select {
 			case <-ctx.Done():
@@ -88,9 +89,13 @@ func MakeWatchConfigChannel(ctx context.Context, configFileName string) chan *Co
 			case <-time.After(time.Second):
 				stat, err := os.Stat(configFileName)
 				if err != nil {
-					log.Errorf("Config file %s not found: %s", configFileName, err)
+					if reportError {
+						log.Errorf("Config file %s not found: %s", configFileName, err)
+						reportError = false
+					}
 					continue
 				}
+				reportError = true
 				if oldTime == stat.ModTime() {
 					continue
 				}

@@ -4,15 +4,16 @@ import (
 	"context"
 	"flag"
 	log "github.com/sirupsen/logrus"
+	"os"
 	"sync"
 	"yadex/config"
 	mongosync "yadex/msync"
 )
 
-func createExchanges(ctx context.Context, cfg *config.Config) []*mongosync.MongoSync {
+func createExchanges(ctx context.Context, cfg *config.Config, wg *sync.WaitGroup) []*mongosync.MongoSync {
 	var result []*mongosync.MongoSync
 	for _, s := range cfg.Exchanges {
-		msync, err := mongosync.NewMongoSync(ctx, s)
+		msync, err := mongosync.NewMongoSync(ctx, s, wg)
 		if err != nil {
 			log.Errorf("Failed to establish sync with config %+v", msync)
 			continue
@@ -25,9 +26,12 @@ func createExchanges(ctx context.Context, cfg *config.Config) []*mongosync.Mongo
 var configFileName string
 
 func processCommandLine() {
-	flag.StringVar(&configFileName, "config", "config.yaml", "path to config file")
-	//flag.BoolVar(&fields, "fields", false, "Count difference for each field present in documents (may slow down)")
-	//flag.BoolVar(&verbose, "verbose", false, "Show report including where collections is identical")
+	// configFileName
+	configFileName = os.Getenv("YADEX_CONFIG")
+	if configFileName == "" {
+		configFileName = "yadex-config.yaml"
+	}
+	flag.StringVar(&configFileName, "config", configFileName, "path to config file")
 	flag.Parse()
 }
 
@@ -38,38 +42,23 @@ func main() {
 	defer cancel()
 	configChan := config.MakeWatchConfigChannel(ctx, configFileName)
 	var Exchanges []*mongosync.MongoSync
-	var wg sync.WaitGroup
+	var waitExchanges sync.WaitGroup
 	stopExchanges := func() {
 		if Exchanges == nil {
 			return
 		}
-		log.Info("Waiting stopping exchanges...")
+		log.Info("wait stopping exchanges...")
 		for _, msync := range Exchanges {
 			close(msync.ExchangeAvailable)
 		}
-		wg.Wait()
+		waitExchanges.Wait()
 	}
 	// here we watch for changes in config and restarting exchanges
 	for cfg := range configChan {
 		// close previous exchanges
 		stopExchanges()
 		// create new exchanges from Cfg
-		Exchanges = createExchanges(ctx, cfg)
-		for _, msync := range Exchanges {
-			wg.Add(1)
-			go func(msync *mongosync.MongoSync) {
-				defer wg.Done()
-				// watch over exchange availability and start/stop exchange depending on it
-				for avail := range msync.ExchangeAvailable {
-					if avail {
-						msync.Start()
-					} else {
-						msync.Stop()
-					}
-				}
-				msync.Stop()
-			}(msync)
-		}
+		Exchanges = createExchanges(ctx, cfg, &waitExchanges)
 	}
 	stopExchanges()
 	log.Info("yadex exited gracefully")
