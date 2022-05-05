@@ -3,16 +3,15 @@ package mongosync
 import (
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson"
-	"sync"
 	"testing"
 	"time"
 )
 
 func TestGetCollChan(t *testing.T) {
 	bwChan := make(chan *BulkWriteOp)
-	putBwOp := func(bwOp *BulkWriteOp) *sync.WaitGroup {
+	putBwOp := func(bwOp *BulkWriteOp) {
 		bwChan <- bwOp
-		return nil
+		return
 	}
 	const maxDelay = 200
 	const maxBatch = 3

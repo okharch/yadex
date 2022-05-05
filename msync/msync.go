@@ -44,8 +44,8 @@ var allRecords = bson.D{} // used for filter parameter where there is no need to
 
 // putBulkWriteOp returned by getBulkWriteOp() works asynchronously with buffered channel of BulkWrite operations.
 // In order to make sure there is no longer pending operations in that channel
-// use WaitGroup.Wait() returned by that function
-type putBulkWriteOp = func(bwOp *BulkWriteOp) *sync.WaitGroup
+// it uses MongoSync.Sync WaitGroup
+type putBulkWriteOp = func(bwOp *BulkWriteOp)
 
 // getBulkWriteOp returns func which is used to add bulkWrite operation to buffered channel
 // this function puts BulkWrite operation only if this is RealTime op or channel is clean
@@ -59,7 +59,6 @@ func (ms *MongoSync) getBulkWriteOp() putBulkWriteOp {
 	// ChanBusy is used to implement privileged access to BulkWriteOp channel for RT vs ST ops
 	// it counts how many ops were put into the channel
 	// ST ops always wait before  channel is empty and only then it is being put into channel
-	var ChanBusy sync.WaitGroup
 	// this goroutine serves BulkWriteOp channel
 	serveBWChan := func() {
 		for bwOp := range bwChan {
@@ -102,7 +101,7 @@ func (ms *MongoSync) getBulkWriteOp() putBulkWriteOp {
 					log.Debugf("Coll %s %d sync_id %s", bwOp.Coll, r.UpsertedCount, bwOp.SyncId)
 				}
 			}
-			ChanBusy.Done()
+			ms.Sync.Done()
 		}
 	}
 	// run few parallel serveBWChan() goroutines
@@ -117,21 +116,21 @@ func (ms *MongoSync) getBulkWriteOp() putBulkWriteOp {
 	// returns putBWOp func which closes bwChan if bwOp is nil,
 	// otherwise puts bwOp RT or ST operation
 	// for ST operation makes sure bwChan is empty
-	return func(bwOp *BulkWriteOp) *sync.WaitGroup {
+	return func(bwOp *BulkWriteOp) {
 		if bwOp == nil {
 			close(bwChan)
-			return &ChanBusy
+			return
 		}
 		if bwOp.RealTime {
-			ChanBusy.Add(1)
+			ms.Sync.Add(1)
 		} else {
 			ChanBusyMutex.Lock() // one ST at a time
-			ChanBusy.Wait()      // wait until channel is clean
-			ChanBusy.Add(1)
+			ms.Sync.Wait()       // wait until channel is clean
+			ms.Sync.Add(1)
 			ChanBusyMutex.Unlock()
 		}
 		bwChan <- bwOp
-		return &ChanBusy
+		return
 	}
 }
 
@@ -292,6 +291,7 @@ type MongoSync struct {
 	Sender, Receiver *mongo.Database
 	Config           *config.ExchangeConfig
 	CollSyncId       *mongo.Collection
+	Sync             sync.WaitGroup
 }
 
 // ConnectMongo establishes monitored connection to uri database server.

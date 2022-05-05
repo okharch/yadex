@@ -7,7 +7,6 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"sync"
 )
 
 func fetchIds(ctx context.Context, coll *mongo.Collection) []interface{} {
@@ -37,14 +36,13 @@ func syncCollection(ctx context.Context, sender, receiver *mongo.Database,
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	wg := &sync.WaitGroup{}
 	models := make([]mongo.WriteModel, maxBulkCount)
 	count := 0
 	flush := func() {
 		if count == 0 {
 			return
 		}
-		wg = putOp(&BulkWriteOp{
+		putOp(&BulkWriteOp{
 			Coll:   collName,
 			OpType: OpLogUnordered,
 			Models: models[:count],
@@ -77,7 +75,6 @@ func syncCollection(ctx context.Context, sender, receiver *mongo.Database,
 		}
 	}
 	flush()
-	wg.Wait()
 	log.Infof("sync of %s completed", collName)
 	return ctx.Err()
 }

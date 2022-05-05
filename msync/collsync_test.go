@@ -47,19 +47,20 @@ func TestSyncCollection(t *testing.T) {
 	require.NotNil(t, ms)
 	const collName = "test"
 	const numDocs = int64(1000)
-	coll := ms.Sender.Collection(collName)
+	coll := ms.Receiver.Collection(collName)
+	require.NoError(t, coll.Drop(ctx))
+	coll = ms.Sender.Collection(collName)
 	err = coll.Drop(ctx)
 	require.NoError(t, err)
 	res, err := coll.InsertMany(ctx, CreateDocs(1, numDocs))
 	require.NoError(t, err)
 	require.Equal(t, numDocs, int64(len(res.InsertedIDs)))
 	//mIds := Ids2Map(res.InsertedIDs)
-	var wg sync.WaitGroup
-	putOp := func(bwOp *BulkWriteOp) *sync.WaitGroup {
+	putOp := func(bwOp *BulkWriteOp) {
 		bwr, err := ms.Receiver.Collection(bwOp.Coll).BulkWrite(ctx, bwOp.Models)
 		require.NoError(t, err)
 		require.Equal(t, int64(len(bwOp.Models)), bwr.InsertedCount)
-		return &wg
+		return
 	}
 	err = syncCollection(ctx, ms.Sender, ms.Receiver, "test", 100, putOp)
 	require.NoError(t, err)
@@ -85,15 +86,14 @@ func TestSyncCollectionMultiple(t *testing.T) {
 	err = coll.Drop(ctx)
 	require.NoError(t, err)
 	//mIds := Ids2Map(res.InsertedIDs)
-	var wg sync.WaitGroup
 	receiverColl := ms.Receiver.Collection(collName)
 	err = receiverColl.Drop(ctx)
 	require.NoError(t, err)
-	putOp := func(bwOp *BulkWriteOp) *sync.WaitGroup {
+	putOp := func(bwOp *BulkWriteOp) {
 		bwr, err := ms.Receiver.Collection(bwOp.Coll).BulkWrite(ctx, bwOp.Models)
 		require.NoError(t, err)
 		require.Equal(t, int64(len(bwOp.Models)), bwr.InsertedCount)
-		return &wg
+		return
 	}
 
 	for i := int64(0); i <= 3; i++ {
