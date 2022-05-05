@@ -42,6 +42,9 @@ type Oplog = <-chan bson.Raw
 
 var allRecords = bson.D{} // used for filter parameter where there is no need to filter
 
+// putBulkWriteOp returned by getBulkWriteOp() works asynchronously with buffered channel of BulkWrite operations.
+// In order to make sure there is no longer pending operations in that channel
+// use WaitGroup.Wait() returned by that function
 type putBulkWriteOp = func(bwOp *BulkWriteOp) *sync.WaitGroup
 
 // getBulkWriteOp returns func which is used to add bulkWrite operation to buffered channel
@@ -60,7 +63,6 @@ func (ms *MongoSync) getBulkWriteOp() putBulkWriteOp {
 	// this goroutine serves BulkWriteOp channel
 	serveBWChan := func() {
 		for bwOp := range bwChan {
-			ChanBusy.Done()
 			// check if context is not expired
 			if ctx.Err() != nil {
 				return
@@ -100,6 +102,7 @@ func (ms *MongoSync) getBulkWriteOp() putBulkWriteOp {
 					log.Debugf("Coll %s %d sync_id %s", bwOp.Coll, r.UpsertedCount, bwOp.SyncId)
 				}
 			}
+			ChanBusy.Done()
 		}
 	}
 	// run few parallel serveBWChan() goroutines
@@ -349,7 +352,7 @@ func NewMongoSync(ctx context.Context, exchCfg *config.ExchangeConfig, waitExcha
 		return nil, fmt.Errorf("failed to establish client for receiver: %w", err)
 	}
 	r.Receiver = receiverClient.Database(r.Config.ReceiverDB)
-	log.Infof("Sucessfully connected to sender's DB at %s", r.Config.SenderURI)
+	log.Infof("Sucessfully connected to receiver's DB at %s", r.Config.ReceiverURI)
 	waitExchanges.Add(1)
 	go func() {
 		defer waitExchanges.Done()
