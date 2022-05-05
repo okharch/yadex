@@ -15,7 +15,8 @@ func TestGetCollChan(t *testing.T) {
 	}
 	const maxDelay = 200
 	const maxBatch = 3
-	ch := getCollChan("testcol", maxDelay, maxBatch, true, putBwOp)
+	var ms MongoSync
+	ch := ms.getCollChan("testcol", maxDelay, maxBatch, true, putBwOp)
 	waitResult := func(delay int) (received bool, bwOp *BulkWriteOp) {
 		// ch is empty, should expire 100ms with no input
 		select {
@@ -79,4 +80,5 @@ func TestGetCollChan(t *testing.T) {
 	require.Equal(t, "testcol", bwOp.Coll)
 	require.Equal(t, 1, len(bwOp.Models))
 	require.Equal(t, OpLogUnordered, bwOp.OpType)
+	ms.Sync.Wait()
 }

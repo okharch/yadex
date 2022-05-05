@@ -52,10 +52,9 @@ type putBulkWriteOp = func(bwOp *BulkWriteOp)
 // it launches goroutine which serves  operation from that channel and
 // 1. sends bulkWrites to receiver mongodb
 // 2. stores sync_id into bookmarkCollSyncId for the ST collection on successful sync operation
-func (ms *MongoSync) getBulkWriteOp() putBulkWriteOp {
+func (ms *MongoSync) getBulkWriteOp(ctx context.Context) putBulkWriteOp {
 	// create buffered (3) BulkWrite channel
 	bwChan := make(chan *BulkWriteOp, 3)
-	ctx := ms.ctx
 	// ChanBusy is used to implement privileged access to BulkWriteOp channel for RT vs ST ops
 	// it counts how many ops were put into the channel
 	// ST ops always wait before  channel is empty and only then it is being put into channel
@@ -101,10 +100,10 @@ func (ms *MongoSync) getBulkWriteOp() putBulkWriteOp {
 					log.Debugf("Coll %s %d sync_id %s", bwOp.Coll, r.UpsertedCount, bwOp.SyncId)
 				}
 			}
-			ms.Sync.Done()
+			ms.ChanBusy.Done()
 		}
 	}
-	// run few parallel serveBWChan() goroutines
+	// runSync few parallel serveBWChan() goroutines
 	for i := 0; i < 2; i++ {
 		go serveBWChan()
 	}
@@ -122,11 +121,11 @@ func (ms *MongoSync) getBulkWriteOp() putBulkWriteOp {
 			return
 		}
 		if bwOp.RealTime {
-			ms.Sync.Add(1)
+			ms.ChanBusy.Add(1)
 		} else {
 			ChanBusyMutex.Lock() // one ST at a time
-			ms.Sync.Wait()       // wait until channel is clean
-			ms.Sync.Add(1)
+			ms.ChanBusy.Wait()   // wait until channel is clean
+			ms.ChanBusy.Add(1)
 			ChanBusyMutex.Unlock()
 		}
 		bwChan <- bwOp
@@ -288,10 +287,15 @@ type MongoSync struct {
 	ctx        context.Context
 	cancelFunc context.CancelFunc
 	//senderClient, receiverClient *mongo.Client
-	Sender, Receiver *mongo.Database
-	Config           *config.ExchangeConfig
-	CollSyncId       *mongo.Collection
-	Sync             sync.WaitGroup
+	Sender, Receiver                   *mongo.Database
+	senderClient, receiverClient       *mongo.Client
+	senderAvailable, receiverAvailable chan bool
+	Config                             *config.ExchangeConfig
+	CollSyncId                         *mongo.Collection
+	ChanBusy                           sync.WaitGroup
+	Sync                               sync.WaitGroup // housekeeping of runSync. it is zero on exit
+	// housekeeping of active exchanges. As soon as there is some problem with connection, etc. it becomes zero
+	waitExchanges *sync.WaitGroup
 }
 
 // ConnectMongo establishes monitored connection to uri database server.
@@ -332,68 +336,83 @@ func ConnectMongo(ctx context.Context, uri string) (client *mongo.Client, availa
 // collection stores last sync_id for each individual collection being synced - so it can resume sync from that point
 const CollSyncIdDbName = "mongoSync"
 
+// NewMongoSync returns
 func NewMongoSync(ctx context.Context, exchCfg *config.ExchangeConfig, waitExchanges *sync.WaitGroup) (*MongoSync, error) {
-	r := &MongoSync{}
+	r := &MongoSync{Config: exchCfg, waitExchanges: waitExchanges}
 	r.Config = exchCfg
+	// get name of bookmarkColSyncid on sender
+	bookmarkColSyncIdName := strings.Join([]string{r.Config.SenderURI, r.Config.SenderDB, r.Config.ReceiverURI, r.Config.ReceiverDB}, "-")
+	reNotId := regexp.MustCompile("[^a-zA-Z0-9]+")
+	bookmarkColSyncIdName = reNotId.ReplaceAllLiteralString(bookmarkColSyncIdName, "-")
 	log.Infof("Establishing exchange %s...", r.Name())
-	senderClient, senderAvailable, err := ConnectMongo(ctx, r.Config.SenderURI)
+	var err error
+	r.senderClient, r.senderAvailable, err = ConnectMongo(ctx, r.Config.SenderURI)
 	if err != nil {
 		return nil, fmt.Errorf("failed to establish client for sender: %w", err)
 	}
 	log.Infof("Sucessfully connected to sender's DB at %s", r.Config.SenderURI)
-	// get name of bookmarkColSyncid on sender
-	bookmarkColSyncIdName := strings.Join([]string{r.Config.SenderURI, r.Config.SenderDB, r.Config.ReceiverURI, r.Config.ReceiverDB}, "-")
-	re := regexp.MustCompile("[^a-zA-Z0-9]+")
-	bookmarkColSyncIdName = re.ReplaceAllLiteralString(bookmarkColSyncIdName, "-")
-	r.CollSyncId = senderClient.Database(CollSyncIdDbName).Collection(bookmarkColSyncIdName)
-	r.Sender = senderClient.Database(r.Config.SenderDB)
-	receiverClient, receiverAvailable, err := ConnectMongo(ctx, r.Config.ReceiverURI)
+	r.Sender = r.senderClient.Database(r.Config.SenderDB)
+	r.CollSyncId = r.senderClient.Database(CollSyncIdDbName).Collection(bookmarkColSyncIdName)
+	r.receiverClient, r.receiverAvailable, err = ConnectMongo(ctx, r.Config.ReceiverURI)
 	if err != nil {
 		return nil, fmt.Errorf("failed to establish client for receiver: %w", err)
 	}
-	r.Receiver = receiverClient.Database(r.Config.ReceiverDB)
+	r.Receiver = r.receiverClient.Database(r.Config.ReceiverDB)
 	log.Infof("Sucessfully connected to receiver's DB at %s", r.Config.ReceiverURI)
-	waitExchanges.Add(1)
-	go func() {
-		defer waitExchanges.Done()
-		senderAvail := true
-		receiverAvail := true
-		exAvail := true
-		oldAvail := false
-		for {
-			if oldAvail != exAvail {
-				log.Infof("senderAvail:%v, ReceiverAvail:%v", senderAvail, receiverAvail)
-				if exAvail {
-					r.Start(ctx)
-				} else {
-					r.Stop()
-				}
-				oldAvail = exAvail
-			}
-			select {
-			case <-ctx.Done():
-				ctx := context.TODO()
-				_ = senderClient.Disconnect(ctx)
-				_ = receiverClient.Disconnect(ctx)
-				return
-			case senderAvail = <-senderAvailable:
-			case receiverAvail = <-receiverAvailable:
-			}
-			exAvail = senderAvail && receiverAvail
-		}
-	}()
 	return r, nil
 }
 
-// Start launches synchronization between sender and receiver based on SyncConfig configuration.
+// runSync launches synchronization between sender and receiver for established MongoSync object.
 // Use cancel (ctx) func to stop synchronization
 // It is used after Stop in a case of Exchange is not available (either sender or receiver)
 // So it creates all channels and trying to resume from the safe point
-func (ms *MongoSync) Start(ctx context.Context) {
-	ms.ctx, ms.cancelFunc = context.WithCancel(ctx)
-	ctx = ms.ctx
+func (ms *MongoSync) Run(ctx context.Context) {
+	senderAvail := true
+	receiverAvail := true
+	exAvail := true
+	oldAvail := false
+	exCtx, exCancel := context.WithCancel(ctx)
+	defer exCancel() // avoid context leak
+	// this loop watches over parent context and exchange's connections available
+	// if they are not, it cancels exCtx so derived channels could be closed and synchronization stopped
+	for {
+		if oldAvail != exAvail {
+			log.Infof("senderAvail:%v, ReceiverAvail:%v", senderAvail, receiverAvail)
+			if exAvail {
+				ms.waitExchanges.Add(1)
+				ms.Sync.Add(1)
+				go ms.runSync(exCtx)
+			} else {
+				log.Infof("Stopping exchange %s", ms.Name())
+				exCancel()
+				ms.Sync.Wait()
+				ms.waitExchanges.Done()
+				exCtx, exCancel = context.WithCancel(ctx)
+			}
+			oldAvail = exAvail
+		}
+		select {
+		case <-ctx.Done():
+			ctx := context.TODO()
+			_ = ms.senderClient.Disconnect(ctx)
+			_ = ms.receiverClient.Disconnect(ctx)
+			return
+		case senderAvail = <-ms.senderAvailable:
+		case receiverAvail = <-ms.receiverAvailable:
+		}
+		exAvail = senderAvail && receiverAvail
+	}
+}
+
+// runSync launches synchronization between sender and receiver for established MongoSync object.
+// Use cancel (ctx) func to stop synchronization
+// It is used in a case of Exchange is not available (either sender or receiver connection fails)
+// it creates all the channels and trying to resume from the safe point
+func (ms *MongoSync) runSync(ctx context.Context) {
 	// create func to put BulkWriteOp into channel. It deals appropriate both with RT and ST
-	opBW := ms.getBulkWriteOp()
+	defer ms.waitExchanges.Done()
+	defer ms.Sync.Done()
+	opBW := ms.getBulkWriteOp(ctx)
 	c := ms.Config
 	collMatch := GetCollMatch(c) //
 	oplog, collSyncId, err := resumeOplog(ctx, ms.Sender, ms.CollSyncId)
@@ -410,15 +429,11 @@ func (ms *MongoSync) Start(ctx context.Context) {
 		return
 	}
 	// start handling oplog for syncing sender and receiver collections
-	processOpLog(oplog, collMatch, collSyncId, opBW)
-	return
+	ms.processOpLog(oplog, collMatch, collSyncId, opBW)
 }
+
 func (ms *MongoSync) Name() string {
 	return fmt.Sprintf("%s.%s => %s.%s", ms.Config.SenderURI, ms.Config.SenderDB, ms.Config.ReceiverURI, ms.Config.ReceiverDB)
-}
-func (ms *MongoSync) Stop() {
-	log.Infof("Stopping exchange %s", ms.Name())
-	ms.cancelFunc()
 }
 
 // processOpLog handles incoming oplog entries from oplog channel
@@ -427,7 +442,7 @@ func (ms *MongoSync) Stop() {
 // it calls getCollChan func to create that channel
 // then it redirects oplog entry to that channel
 // if SyncId for that oplog is equal or greater than syncId for the collection
-func processOpLog(oplog Oplog, cm CollMatch, collSyncStartFrom map[string]string, bwOp putBulkWriteOp) {
+func (ms *MongoSync) processOpLog(oplog Oplog, cm CollMatch, collSyncStartFrom map[string]string, bwOp putBulkWriteOp) {
 	collChan := make(map[string]chan<- bson.Raw, 256)
 	defer func() {
 		// close channels for oplog operations
@@ -461,7 +476,7 @@ func processOpLog(oplog Oplog, cm CollMatch, collSyncStartFrom map[string]string
 			log.Debugf("start follow coll %s from %s", coll, syncId)
 		}
 		// now establish handling channel for that collection so the next op can be handled
-		collChan[coll] = getCollChan(coll, delay, batch, rt, bwOp)
+		collChan[coll] = ms.getCollChan(coll, delay, batch, rt, bwOp)
 		collChan[coll] <- op
 	}
 }

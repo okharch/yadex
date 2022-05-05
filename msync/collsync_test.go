@@ -2,6 +2,7 @@ package mongosync
 
 import (
 	"context"
+	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson"
 	"sync"
@@ -22,16 +23,6 @@ func CreateDocs(start, numRecs int64) []interface{} {
 		docs[i-start] = bson.D{{"_id", i}}
 	}
 	return docs
-}
-
-func TestNewMongoSync(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.TODO())
-	var waitSync sync.WaitGroup
-	ms, err := NewMongoSync(ctx, ExchCfg, &waitSync)
-	require.NoError(t, err)
-	require.NotNil(t, ms)
-	cancel()
-	waitSync.Wait()
 }
 
 // TestSyncCollection simple test which
@@ -110,5 +101,6 @@ func TestSyncCollectionMultiple(t *testing.T) {
 	}
 
 	cancel()
+	log.Info("waitSync.Wait()")
 	waitSync.Wait()
 }
