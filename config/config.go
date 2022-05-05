@@ -64,7 +64,7 @@ func MakeWatchConfigChannel(ctx context.Context, configFileName string) chan *Co
 			log.Infof("reread configuration from %s", configFileName)
 			cfg, err := ReadConfig(configFileName)
 			if err != nil {
-				log.Errorf("Config file %s is invalid: %s", configFileName, err)
+				log.Errorf("failed to read config file %s: %s", configFileName, err)
 				return
 			}
 			configChan <- cfg
