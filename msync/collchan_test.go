@@ -81,9 +81,3 @@ func TestGetCollChan(t *testing.T) {
 	require.Equal(t, 1, len(bwOp.Models))
 	require.Equal(t, OpLogUnordered, bwOp.OpType)
 }
-
-func createOp(t *testing.T, op bson.M) (r bson.Raw) {
-	r, err := bson.Marshal(op)
-	require.NoError(t, err)
-	return
-}

@@ -1,8 +1,10 @@
 package mongosync
 
 import (
+	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
+	"testing"
 )
 
 // getColl extracts collection's name from op(log)
@@ -34,4 +36,11 @@ func getWriteModel(op bson.Raw) (opLogType OpLogType, model mongo.WriteModel) {
 		opLogType = OpLogUnknown
 	}
 	return opLogType, model
+}
+
+// createOp is used by various unit tests to convert bson.M into bson.Raw
+func createOp(t *testing.T, op bson.M) (r bson.Raw) {
+	r, err := bson.Marshal(op)
+	require.NoError(t, err)
+	return
 }
