@@ -37,7 +37,7 @@ func syncCollection(ctx context.Context, sender, receiver *mongo.Database,
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	var wg *sync.WaitGroup
+	wg := &sync.WaitGroup{}
 	models := make([]mongo.WriteModel, maxBulkCount)
 	count := 0
 	flush := func() {

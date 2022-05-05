@@ -39,6 +39,7 @@ func TestNewMongoSync(t *testing.T) {
 // 2. copies it to the receiver using syncCollection routine
 // 3. checks 1000 records delivered
 func TestSyncCollection(t *testing.T) {
+	config.SetLogger()
 	ctx, cancel := context.WithCancel(context.TODO())
 	var waitSync sync.WaitGroup
 	ms, err := NewMongoSync(ctx, ExchCfg, &waitSync)
@@ -67,10 +68,10 @@ func TestSyncCollection(t *testing.T) {
 }
 
 // TestSyncCollection2Steps test
-// 1. insert 1000 records
+// 1. insert 100000 records
 // 2. sync to the receiver
-// 3. insert another 1000 records
-// 4. sync to the receiver. This time it should be 1000 records copied, not 2000
+// 3. insert another 100000 records
+// 4. sync to the receiver. This time it should be 100000 records copied, not 200000
 func TestSyncCollectionMultiple(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.TODO())
 	var waitSync sync.WaitGroup
