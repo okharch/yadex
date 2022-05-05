@@ -42,7 +42,7 @@ func TestMakeWatchConfigChannel(t *testing.T) {
 	require.Nil(t, err)
 	require.Equal(t, n, len(b))
 	require.NoError(t, f.Close())
-	ctx := context.TODO()
+	ctx, cancel := context.WithCancel(context.TODO())
 	cfgChan := MakeWatchConfigChannel(ctx, f.Name())
 	require.NotNil(t, cfgChan)
 	// first available after watching
@@ -54,48 +54,75 @@ func TestMakeWatchConfigChannel(t *testing.T) {
 	require.Equal(t, x.ReceiverURI, x1.ReceiverURI)
 	require.Equal(t, x.SenderURI, x1.SenderURI)
 	// now nothing available for 1 second
+	var timeout bool
 	waitConfig := func(Delay time.Duration) *Config {
+		timeout = false
 		select {
 		case res := <-cfgChan:
+			if res == nil {
+				log.Infof("waitConfig: channel is closed, return nil")
+			} else {
+				log.Infof("waitConfig: obtained new config from cfgChan")
+			}
 			return res
 		case <-time.After(Delay):
+			log.Infof("waitConfig: exit on timeout %v", Delay)
+			timeout = true
 		}
 		return nil
 	}
-	log.Info("file has not been updated, so wait for full 3 second without update")
-	c2 := waitConfig(time.Second * 3)
+
+	log.Info("file has not been updated, so wait for full 1 second without update")
+	c2 := waitConfig(time.Millisecond * 200)
 	require.Nil(t, c2)
 	// now update config
 	x.SenderURI = "s2"
 	b, err = yaml.Marshal(c)
 	require.NoError(t, err)
-	log.Infof("Updating %s file. It will take no more than two second to detect changes", f.Name())
+
+	log.Infof("Updating %s file. It will take no more than 1/2 second to detect changes", f.Name())
 	err = os.WriteFile(f.Name(), b, 0666)
 	require.NoError(t, err)
-	c2 = waitConfig(time.Second * 10)
-	x2 := c2.Exchanges[0]
+	c2 = waitConfig(time.Millisecond * 30)
 	require.NotNil(t, c2)
+	x2 := c2.Exchanges[0]
 	require.Equal(t, x.SenderURI, x2.SenderURI)
-	// now update config and send syscall.SIGHUP to osSignal
-	x.SenderURI = "s3"
-	b, err = yaml.Marshal(c)
-	require.NoError(t, err)
-	log.Infof("Updating %s file. But wait only 10ms so it would not be able to detect changes", f.Name())
-	err = os.WriteFile(f.Name(), b, 0666)
-	require.NoError(t, err)
-	c3 := waitConfig(time.Millisecond * 10)
+
+	log.Infof("Keep %s file untouched. It will not return new config", f.Name())
+	c3 := waitConfig(time.Millisecond * 200)
+	require.True(t, timeout)
 	require.Nil(t, c3)
-	// send SIGHUP asynchronously
-	log.Info("Sending SIGHUP signal to help detect changes immediately")
-	go func() {
-		osSignal <- syscall.SIGHUP
-	}()
+
+	log.Infof("Now use SIGHUP to force reading config from %s", f.Name())
+	osSignal <- syscall.SIGHUP
 	c3 = waitConfig(time.Millisecond * 10)
 	require.NotNil(t, c3)
 	x3 := c3.Exchanges[0]
 	require.Equal(t, x.SenderURI, x3.SenderURI)
+
+	// now test SIGTERM
+	osSignal <- os.Interrupt
+	// channel should be closed, c would be nil
+	c = waitConfig(time.Millisecond)
+	require.False(t, timeout)
+	require.Nil(t, c)
+
+	// now test closing channel on expired context
+	cfgChan = MakeWatchConfigChannel(ctx, f.Name())
+	require.NotNil(t, cfgChan)
+	c = waitConfig(time.Millisecond)
+	require.False(t, timeout)
+	require.NotNil(t, c)
+	cancel()
+	// channel should be closed, c would be nil
+	c = waitConfig(time.Millisecond)
+	require.False(t, timeout)
+	require.Nil(t, c)
+
+	// finally remove temporary file
 	require.NoError(t, os.Remove(f.Name())) // remove temp file
 }
+
 func SetLogger() {
 	Formatter := new(log.TextFormatter)
 	//Formatter.TimestampFormat = "2006-01-02T15:04:05.999999999Z07:00"

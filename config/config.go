@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"github.com/fsnotify/fsnotify"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
@@ -45,7 +46,7 @@ func ReadConfig(configFile string) (*Config, error) {
 	return &result, nil
 }
 
-// MakeWatchConfigChannel creates  channel to notify abdout config changes
+// MakeWatchConfigChannel creates  channel to notify about config changes
 // normal reaction implies to stop objects that depends on config, recreate them and rerun
 // if parent context is done, it closes the channel
 // also it listens to os.Interrupt signal. If it occurs it closes the channel
@@ -59,14 +60,7 @@ func MakeWatchConfigChannel(ctx context.Context, configFileName string) chan *Co
 		signal.Notify(osSignal, os.Interrupt)
 		signal.Notify(osSignal, syscall.SIGHUP) // reload config
 		// watch file configFileName and Ctrl+C signal. Close channel on Ctrl+C
-		var oldTime time.Time
 		rereadConfig := func() {
-			stat, err := os.Stat(configFileName)
-			if err != nil {
-				log.Errorf("Failed to update stat on %s: %s", configFileName, err)
-				return
-			}
-			oldTime = stat.ModTime()
 			log.Infof("reread configuration from %s", configFileName)
 			cfg, err := ReadConfig(configFileName)
 			if err != nil {
@@ -76,7 +70,21 @@ func MakeWatchConfigChannel(ctx context.Context, configFileName string) chan *Co
 			configChan <- cfg
 		}
 		rereadConfig()
-		reportError := true
+		watcher, err := fsnotify.NewWatcher()
+		if err != nil {
+			log.Errorf("failed to establish file watcher:%s", err)
+			return
+		}
+		defer func() {
+			_ = watcher.Close()
+		}()
+		err = watcher.Add(configFileName)
+		if err != nil {
+			log.Errorf("failed to create watcher on file %s", configFileName)
+			return
+		}
+		const infiniteDuration = time.Hour * 10000
+		postponeReload := infiniteDuration
 		for {
 			select {
 			case <-ctx.Done():
@@ -89,21 +97,17 @@ func MakeWatchConfigChannel(ctx context.Context, configFileName string) chan *Co
 				}
 				log.Info("Gracefully handling Ctrl+C signal...")
 				return
-			case <-time.After(time.Second * 2):
-				stat, err := os.Stat(configFileName)
-				if err != nil {
-					if reportError {
-						log.Errorf("Config file %s not found: %s", configFileName, err)
-						reportError = false
-					}
-					continue
+			case event := <-watcher.Events:
+				log.Debugf("Watch config event:%+v", event)
+				if event.Op&fsnotify.Write == fsnotify.Write {
+					// postpone reload as usually there fre Write events and we want to reload only once
+					postponeReload = time.Millisecond * 5
 				}
-				reportError = true
-				if oldTime == stat.ModTime() {
-					continue
-				}
-				log.Info("Rereading config as file has been updated...")
+			case <-time.After(postponeReload):
+				postponeReload = infiniteDuration
 				rereadConfig()
+			case err := <-watcher.Errors:
+				log.Errorf("Watch config file %s error:%s", configFileName, err)
 			}
 		}
 	}()
