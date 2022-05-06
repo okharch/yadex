@@ -2,19 +2,15 @@ package mongosync
 
 import (
 	"context"
-	"encoding/hex"
-	"errors"
 	"fmt"
 	log "github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/event"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"math/rand"
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 	"yadex/config"
 )
 
@@ -40,27 +36,58 @@ type BulkWriteOp struct {
 
 type Oplog = <-chan bson.Raw
 
+type collCount struct {
+	coll  string
+	count int
+}
+
+type MongoSync struct {
+	ctx               context.Context
+	cancelFunc        context.CancelFunc
+	Sender, Receiver  *mongo.Database
+	senderClient      *mongo.Client
+	receiverClient    *mongo.Client
+	senderAvailable   chan bool
+	receiverAvailable chan bool
+	bwChan            chan *BulkWriteOp
+	collCountChan     chan collCount
+	Config            *config.ExchangeConfig
+	collSyncId        map[string]string
+	bwChanBusy        sync.Mutex // need for exclusive wait when ST op invoked
+	ChanBusy          sync.WaitGroup
+	Sync              sync.WaitGroup // housekeeping of runSync. it is zero on exit
+	CollSyncId        *mongo.Collection
+	oplog             Oplog
+	collMatch         CollMatch
+	collChan          map[string]chan<- bson.Raw
+	idle              func()
+	idleChan          chan struct{}
+	// housekeeping of active exchanges. As soon as there is some problem with connection, etc. it becomes zero
+	waitExchanges *sync.WaitGroup
+}
+
 var allRecords = bson.D{} // used for filter parameter where there is no need to filter
 
-// putBulkWriteOp returned by getBulkWriteOp() works asynchronously with buffered channel of BulkWrite operations.
-// In order to make sure there is no longer pending operations in that channel
-// it uses MongoSync.Sync WaitGroup
-type putBulkWriteOp = func(bwOp *BulkWriteOp)
-
-// getBulkWriteOp returns func which is used to add bulkWrite operation to buffered channel
+// InitBulkWriteChan creates bwChan chan *BulkWriteOp field which is used to add bulkWrite operation to buffered channel
 // this function puts BulkWrite operation only if this is RealTime op or channel is clean
 // it launches goroutine which serves  operation from that channel and
 // 1. sends bulkWrites to receiver mongodb
-// 2. stores sync_id into bookmarkCollSyncId for the ST collection on successful sync operation
-func (ms *MongoSync) getBulkWriteOp(ctx context.Context) putBulkWriteOp {
+// 2. stores sync_id into CollSyncId for the ST collection on successful sync operation
+func (ms *MongoSync) InitBulkWriteChan(ctx context.Context) {
+	// get name of bookmarkColSyncid on sender
+	bookmarkColSyncIdName := strings.Join([]string{ms.Config.SenderURI, ms.Config.SenderDB, ms.Config.ReceiverURI, ms.Config.ReceiverDB},
+		"-")
+	reNotId := regexp.MustCompile("[^a-zA-Z0-9]+")
+	bookmarkColSyncIdName = reNotId.ReplaceAllLiteralString(bookmarkColSyncIdName, "-")
+	ms.CollSyncId = ms.senderClient.Database(CollSyncIdDbName).Collection(bookmarkColSyncIdName)
 	// create buffered (3) BulkWrite channel
-	bwChan := make(chan *BulkWriteOp, 3)
+	ms.bwChan = make(chan *BulkWriteOp, 3)
 	// ChanBusy is used to implement privileged access to BulkWriteOp channel for RT vs ST ops
 	// it counts how many ops were put into the channel
 	// ST ops always wait before  channel is empty and only then it is being put into channel
 	// this goroutine serves BulkWriteOp channel
 	serveBWChan := func() {
-		for bwOp := range bwChan {
+		for bwOp := range ms.bwChan {
 			// check if context is not expired
 			if ctx.Err() != nil {
 				return
@@ -97,7 +124,8 @@ func (ms *MongoSync) getBulkWriteOp(ctx context.Context) putBulkWriteOp {
 				if r, err := ms.CollSyncId.ReplaceOne(ctx, filter, doc, optUpsert); err != nil {
 					log.Warnf("failed to update sync_id for collAtReceiver %s: %s", bwOp.Coll, err)
 				} else {
-					log.Debugf("Coll %s %d sync_id %s", bwOp.Coll, r.UpsertedCount, bwOp.SyncId)
+					log.Debugf("Coll found(updated) %d(%d) %s.sync_id %s", r.MatchedCount, r.UpsertedCount+r.ModifiedCount, bwOp.Coll,
+						bwOp.SyncId)
 				}
 			}
 			ms.ChanBusy.Done()
@@ -108,29 +136,39 @@ func (ms *MongoSync) getBulkWriteOp(ctx context.Context) putBulkWriteOp {
 		go serveBWChan()
 	}
 
-	// this mutex needed to avoid two or more separate ST detects that channel is empty.
-	// before waiting, it Locks and after ChanBusy.Add(1) it unlocks so
-	// next ST will be waiting until channel is empty again
-	var ChanBusyMutex sync.Mutex // need for exclusive wait when ST op invoked
-	// returns putBWOp func which closes bwChan if bwOp is nil,
-	// otherwise puts bwOp RT or ST operation
-	// for ST operation makes sure bwChan is empty
-	return func(bwOp *BulkWriteOp) {
-		if bwOp == nil {
-			close(bwChan)
-			return
-		}
-		if bwOp.RealTime {
+}
+
+// putBwOp puts BulkWriteOp to BulkWriteChan.
+// special value nil is used to make sure bwChan is empty
+// It respects RT vs ST priority.
+// It puts RT bwOp without delay
+// It will wait until channel is empty and only then will put ST bwOp
+func (ms *MongoSync) putBwOp(bwOp *BulkWriteOp) {
+	//log.Debugf("putBwOp: %s %v %d", bwOp.Coll,bwOp.OpType, len(bwOp.Models))
+	if bwOp != nil && bwOp.RealTime {
+		ms.ChanBusy.Add(1)
+	} else {
+		// this mutex needed to avoid two or more separate ST finding that channel is empty.
+		// before waiting, it Locks and after ChanBusy.Add(1) it unlocks so
+		// next ST will be waiting until channel is empty again
+		ms.bwChanBusy.Lock() // one ST at a time
+		//log.Debugf("putBwOp.Wait: %s %v %d", bwOp.Coll,bwOp.OpType, len(bwOp.Models))
+		ms.ChanBusy.Wait() // wait until channel is clean
+		if bwOp != nil {
 			ms.ChanBusy.Add(1)
-		} else {
-			ChanBusyMutex.Lock() // one ST at a time
-			ms.ChanBusy.Wait()   // wait until channel is clean
-			ms.ChanBusy.Add(1)
-			ChanBusyMutex.Unlock()
 		}
-		bwChan <- bwOp
-		return
+		ms.bwChanBusy.Unlock()
 	}
+	//log.Debugf("putBwOp->channel: %s %v %d", bwOp.Coll,bwOp.OpType, len(bwOp.Models))
+	if bwOp != nil {
+		ms.bwChan <- bwOp
+	}
+	return
+}
+
+func (ms *MongoSync) WaitFlushed() {
+	<-ms.idleChan
+	ms.putBwOp(nil)
 }
 
 // fetchCollSyncId fetches sorted by sync_id list of docs (collName, sync_id)
@@ -153,149 +191,40 @@ func fetchCollSyncId(ctx context.Context, bookmarkCollSyncId *mongo.Collection) 
 // it returns collSyncId map for all collections that has greater sync_id.
 // if it fails to resume from any stored sync_id it starts from current oplog
 // and returns empty collSyncId
-func resumeOplog(ctx context.Context, sender *mongo.Database, bookmarkCollSyncId *mongo.Collection) (oplog Oplog, collSyncId map[string]string, err error) {
-	csBookmarks, err := fetchCollSyncId(ctx, bookmarkCollSyncId)
+func (ms *MongoSync) resumeOplog(ctx context.Context) error {
+	csBookmarks, err := fetchCollSyncId(ctx, ms.CollSyncId)
 	if ctx.Err() != nil {
-		return // gracefully handle sync.Stop
+		return ctx.Err() // gracefully handle sync.Stop
 	}
 	if err != nil {
 		log.Warn(err)
 	}
-	collSyncId = make(map[string]string, len(csBookmarks))
+	ms.collSyncId = make(map[string]string, len(csBookmarks))
 	for _, b := range csBookmarks {
 		v, ok := b["sync_id"]
 		if !ok {
 			continue
 		}
 		syncId := v.(string)
-		if oplog == nil {
-			oplog, err = GetDbOpLog(ctx, sender, syncId)
-			if oplog != nil {
+		if ms.oplog == nil {
+			ms.oplog, err = GetDbOpLog(ctx, ms.Sender, syncId)
+			if ms.oplog != nil {
 				coll := b["_id"].(string)
 				log.Infof("sync was resumed from (%s) %s", coll, syncId)
 			}
 		}
-		if oplog != nil {
+		if ms.oplog != nil {
 			// store all syncId that is greater than
 			// from what we are resuming sync for each collection,
 			// so, we know whether to ignore oplog related to that coll until it comes to collSyncId
 			coll := b["_id"].(string)
-			collSyncId[coll] = syncId
+			ms.collSyncId[coll] = syncId
 		}
 	}
-	if ctx.Err() != nil {
-		return // gracefully handle sync.Stop
+	if ms.oplog == nil { // give up on resume, start from current state after cloning collections
+		ms.oplog, err = GetDbOpLog(ctx, ms.Sender, "")
 	}
-	if oplog == nil { // give up on resume, start from current state after cloning collections
-		oplog, err = GetDbOpLog(ctx, sender, "")
-	}
-	if ctx.Err() != nil {
-		return // gracefully handle sync.Stop
-	}
-	return oplog, collSyncId, err
-}
-
-// getOpLog gets oplog and decodes it to bson.M. If it fails it returns nil
-func getOpLog(ctx context.Context, changeStream *mongo.ChangeStream) (bson.M, error) {
-	var op bson.M
-	if changeStream.Next(ctx) && changeStream.Decode(&op) == nil {
-		return op, nil
-	}
-	return nil, changeStream.Err()
-}
-
-// getChangeStream tries to resume sync from last successfully committed syncId.
-// That id is stored for each mongo collection each time after successful write oplog into receiver database.
-func getChangeStream(ctx context.Context, sender *mongo.Database, syncId string) (changeStream *mongo.ChangeStream, err error) {
-	// add option so mongo provides FullDocument for update event
-	opts := options.ChangeStream().SetFullDocument(options.UpdateLookup)
-	if syncId != "" {
-		resumeToken := &bson.M{"_data": syncId}
-		opts.SetResumeAfter(resumeToken)
-	}
-	var pipeline mongo.Pipeline
-	// start watching oplog before cloning collections
-	return sender.Watch(ctx, pipeline, opts)
-}
-
-func GetDbOpLog(ctx context.Context, db *mongo.Database, syncId string) (<-chan bson.Raw, error) {
-	changeStream, err := getChangeStream(ctx, db, syncId)
-	if err != nil {
-		return nil, err
-	}
-	ch := make(chan bson.Raw)
-	go func() {
-		defer close(ch)
-		for {
-			for changeStream.Next(ctx) {
-				ch <- changeStream.Current
-			}
-			err = changeStream.Err()
-			if errors.Is(err, context.Canceled) {
-				log.Info("Process oplog gracefully shutdown")
-				return
-			} else if err == nil {
-				for {
-					log.Infof("Waiting for oplog to resume")
-					time.Sleep(time.Second * 5)
-					changeStream, err = getChangeStream(ctx, db, "")
-					if err == nil {
-						break
-					}
-					log.Errorf("Can't get oplog: %s", err)
-				}
-			} else {
-				log.Errorf("exiting oplog processing: can't get next oplog entry %s", err)
-			}
-		}
-	}()
-	return ch, nil
-}
-
-func GetRandomHex(l int) string {
-	bName := make([]byte, l)
-	rand.Read(bName)
-	return hex.EncodeToString(bName)
-}
-
-// getLastSyncId retrieves where oplog is now.
-// It inserts some record into random collection which it then drops
-// it returns syncIid for insert operation.
-func getLastSyncId(ctx context.Context, sender *mongo.Database) (string, error) {
-	coll := sender.Collection("rnd" + GetRandomHex(8))
-	changeStreamLastSync, err := getChangeStream(ctx, sender, "")
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		// drop the temporary collection
-		_ = changeStreamLastSync.Close(ctx)
-		_ = coll.Drop(ctx)
-	}()
-	// make some update to generate oplog
-	if _, err := coll.InsertOne(ctx, bson.M{"count": 1}); err != nil {
-		return "", err
-	}
-	op, err := getOpLog(ctx, changeStreamLastSync)
-	if op == nil {
-		return "", err
-	}
-	return op["_id"].(bson.M)["_data"].(string), nil
-}
-
-type MongoSync struct {
-	ctx        context.Context
-	cancelFunc context.CancelFunc
-	//senderClient, receiverClient *mongo.Client
-	Sender, Receiver                   *mongo.Database
-	senderClient, receiverClient       *mongo.Client
-	senderAvailable, receiverAvailable chan bool
-	Config                             *config.ExchangeConfig
-	CollSyncId                         *mongo.Collection
-	ChanBusy                           sync.WaitGroup
-	Sync                               sync.WaitGroup // housekeeping of runSync. it is zero on exit
-	// housekeeping of active exchanges. As soon as there is some problem with connection, etc. it becomes zero
-	waitExchanges *sync.WaitGroup
+	return err
 }
 
 // ConnectMongo establishes monitored connection to uri database server.
@@ -340,10 +269,6 @@ const CollSyncIdDbName = "mongoSync"
 func NewMongoSync(ctx context.Context, exchCfg *config.ExchangeConfig, waitExchanges *sync.WaitGroup) (*MongoSync, error) {
 	r := &MongoSync{Config: exchCfg, waitExchanges: waitExchanges}
 	r.Config = exchCfg
-	// get name of bookmarkColSyncid on sender
-	bookmarkColSyncIdName := strings.Join([]string{r.Config.SenderURI, r.Config.SenderDB, r.Config.ReceiverURI, r.Config.ReceiverDB}, "-")
-	reNotId := regexp.MustCompile("[^a-zA-Z0-9]+")
-	bookmarkColSyncIdName = reNotId.ReplaceAllLiteralString(bookmarkColSyncIdName, "-")
 	log.Infof("Establishing exchange %s...", r.Name())
 	var err error
 	r.senderClient, r.senderAvailable, err = ConnectMongo(ctx, r.Config.SenderURI)
@@ -352,17 +277,17 @@ func NewMongoSync(ctx context.Context, exchCfg *config.ExchangeConfig, waitExcha
 	}
 	log.Infof("Sucessfully connected to sender's DB at %s", r.Config.SenderURI)
 	r.Sender = r.senderClient.Database(r.Config.SenderDB)
-	r.CollSyncId = r.senderClient.Database(CollSyncIdDbName).Collection(bookmarkColSyncIdName)
 	r.receiverClient, r.receiverAvailable, err = ConnectMongo(ctx, r.Config.ReceiverURI)
 	if err != nil {
 		return nil, fmt.Errorf("failed to establish client for receiver: %w", err)
 	}
 	r.Receiver = r.receiverClient.Database(r.Config.ReceiverDB)
 	log.Infof("Sucessfully connected to receiver's DB at %s", r.Config.ReceiverURI)
+	r.collMatch = GetCollMatch(r.Config) //
 	return r, nil
 }
 
-// runSync launches synchronization between sender and receiver for established MongoSync object.
+// Run launches synchronization between sender and receiver for established MongoSync object.
 // Use cancel (ctx) func to stop synchronization
 // It is used after Stop in a case of Exchange is not available (either sender or receiver)
 // So it creates all channels and trying to resume from the safe point
@@ -372,7 +297,6 @@ func (ms *MongoSync) Run(ctx context.Context) {
 	exAvail := true
 	oldAvail := false
 	exCtx, exCancel := context.WithCancel(ctx)
-	defer exCancel() // avoid context leak
 	// this loop watches over parent context and exchange's connections available
 	// if they are not, it cancels exCtx so derived channels could be closed and synchronization stopped
 	for {
@@ -396,6 +320,7 @@ func (ms *MongoSync) Run(ctx context.Context) {
 			ctx := context.TODO()
 			_ = ms.senderClient.Disconnect(ctx)
 			_ = ms.receiverClient.Disconnect(ctx)
+			exCancel()
 			return
 		case senderAvail = <-ms.senderAvailable:
 		case receiverAvail = <-ms.receiverAvailable:
@@ -412,10 +337,8 @@ func (ms *MongoSync) runSync(ctx context.Context) {
 	// create func to put BulkWriteOp into channel. It deals appropriate both with RT and ST
 	defer ms.waitExchanges.Done()
 	defer ms.Sync.Done()
-	opBW := ms.getBulkWriteOp(ctx)
-	c := ms.Config
-	collMatch := GetCollMatch(c) //
-	oplog, collSyncId, err := resumeOplog(ctx, ms.Sender, ms.CollSyncId)
+	ms.InitBulkWriteChan(ctx)
+	err := ms.resumeOplog(ctx)
 	if ctx.Err() != nil {
 		return // gracefully handle sync.Stop
 	}
@@ -423,13 +346,13 @@ func (ms *MongoSync) runSync(ctx context.Context) {
 		log.Errorf("Can't resume oplog: %s", err)
 		return
 	}
-	// clone collections which we don't have bookmarks for restoring syncing using oplog
-	if err := SyncCollections(ctx, collMatch, collSyncId, ms.Sender, ms.Receiver, opBW); err != nil {
+	// clone collections which we don't have bookmarks for restoring from oplog
+	if err := ms.SyncCollections(ctx); err != nil {
 		log.Errorf("failed to copy collections: %s, waiting for another chance", err)
 		return
 	}
 	// start handling oplog for syncing sender and receiver collections
-	ms.processOpLog(oplog, collMatch, collSyncId, opBW)
+	ms.processOpLog()
 }
 
 func (ms *MongoSync) Name() string {
@@ -442,26 +365,31 @@ func (ms *MongoSync) Name() string {
 // it calls getCollChan func to create that channel
 // then it redirects oplog entry to that channel
 // if SyncId for that oplog is equal or greater than syncId for the collection
-func (ms *MongoSync) processOpLog(oplog Oplog, cm CollMatch, collSyncStartFrom map[string]string, bwOp putBulkWriteOp) {
-	collChan := make(map[string]chan<- bson.Raw, 256)
+func (ms *MongoSync) processOpLog() {
+	ms.collChan = make(map[string]chan<- bson.Raw, 256)
 	defer func() {
 		// close channels for oplog operations
-		for _, ch := range collChan {
+		for _, ch := range ms.collChan {
 			ch <- nil // flush them before closing
 			close(ch)
 		}
 	}()
+	ms.initIdle()
 	// loop until context tells we are done
-	for op := range oplog {
+	for op := range ms.oplog {
 		// find out the name of the collection
 		// check if it is synced
+		if op == nil {
+			ms.idle()
+			continue
+		}
 		coll := getColl(op)
-		delay, batch, rt := cm(coll)
+		delay, batch, rt := ms.collMatch(coll)
 		if delay == -1 {
 			continue // ignore sync for this collection
 		}
 		// find out the channel for collection
-		if ch, ok := collChan[coll]; ok {
+		if ch, ok := ms.collChan[coll]; ok {
 			// if a channel is there - the sync is underway, no need for other checks
 			ch <- op
 			continue
@@ -469,14 +397,63 @@ func (ms *MongoSync) processOpLog(oplog Oplog, cm CollMatch, collSyncStartFrom m
 		if !rt {
 			// check whether we reached syncId to start collection sync
 			syncId := getSyncId(op)
-			if startFrom, ok := collSyncStartFrom[coll]; ok && syncId < startFrom {
+			if startFrom, ok := ms.collSyncId[coll]; ok && syncId < startFrom {
 				// ignore operation while current sync_id is less than collection's one
 				continue
 			}
 			log.Debugf("start follow coll %s from %s", coll, syncId)
 		}
 		// now establish handling channel for that collection so the next op can be handled
-		collChan[coll] = ms.getCollChan(coll, delay, batch, rt, bwOp)
-		collChan[coll] <- op
+		ms.collChan[coll] = ms.getCollChan(coll, delay, batch, rt)
+		ms.collChan[coll] <- op
+	}
+}
+
+func (ms *MongoSync) initIdle() {
+	ms.collCountChan = make(chan collCount, 1)
+	collCount := make(map[string]int)
+	var collMax string
+	var collMaxCount int
+	refreshMax := func() {
+		// find new collMaxCount
+		collMaxCount = 0
+		collMax = ""
+		for coll, count := range collCount {
+			if count > collMaxCount {
+				collMax = coll
+				collMaxCount = count
+			}
+		}
+	}
+	// handle collCount channel
+	go func() {
+		for cc := range ms.collCountChan {
+			if cc.count == 0 {
+				delete(collCount, cc.coll)
+				if cc.coll == collMax {
+					refreshMax()
+				}
+				continue
+			}
+			if cc.count > collMaxCount {
+				collMax = cc.coll
+				collMaxCount = cc.count
+			}
+			collCount[cc.coll] = cc.count
+		}
+	}()
+	ms.idleChan = make(chan struct{}, 1)
+	ms.idle = func() {
+		// non-blocking read
+		select {
+		case <-ms.idleChan:
+		default:
+		}
+		if collMaxCount > 0 {
+			// this will refreshMax upon flushing
+			ms.collChan[collMax] <- nil
+		} else {
+			ms.idleChan <- struct{}{}
+		}
 	}
 }

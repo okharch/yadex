@@ -30,8 +30,7 @@ func fetchIds(ctx context.Context, coll *mongo.Collection) []interface{} {
 
 // syncCollection
 // insert all the docs from sender but those which _ids found at receiver
-func syncCollection(ctx context.Context, sender, receiver *mongo.Database,
-	collName string, maxBulkCount int, putOp putBulkWriteOp) error {
+func (ms *MongoSync) syncCollection(ctx context.Context, collName string, maxBulkCount int, syncId string) error {
 	log.Infof("cloning collection %s...", collName)
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -42,19 +41,19 @@ func syncCollection(ctx context.Context, sender, receiver *mongo.Database,
 		if count == 0 {
 			return
 		}
-		putOp(&BulkWriteOp{
+		ms.putBwOp(&BulkWriteOp{
 			Coll:   collName,
 			OpType: OpLogUnordered,
 			Models: models[:count],
-			//SyncId: "",
+			SyncId: syncId,
 			//RealTime: false,
 		})
 		models = make([]mongo.WriteModel, maxBulkCount)
 		count = 0
 	}
 	// copy all the records which are not on the receiver yet
-	coll := sender.Collection(collName)
-	receiverIds := fetchIds(ctx, receiver.Collection(collName))
+	coll := ms.Sender.Collection(collName)
+	receiverIds := fetchIds(ctx, ms.Receiver.Collection(collName))
 	filter := bson.M{}
 	if len(receiverIds) > 0 {
 		log.Infof("found %d documents at receiver's collection %s...", len(receiverIds), collName)
@@ -85,29 +84,28 @@ func syncCollection(ctx context.Context, sender, receiver *mongo.Database,
 // so it can start dealing with oplog starting with that Id
 // it returns nil if it was able to clone all the collections
 // successfully into chBulkWriteOps channels
-func SyncCollections(ctx context.Context, collMatch CollMatch, collSyncStartFrom map[string]string, sender, receiver *mongo.Database,
-	putOp putBulkWriteOp) error {
+func (ms *MongoSync) SyncCollections(ctx context.Context) error {
 	// here we clone those collections which does not have sync_id
 	// get all collections from database and clone those without sync_id
-	colls, err := sender.ListCollectionNames(ctx, allRecords)
+	colls, err := ms.Sender.ListCollectionNames(ctx, allRecords)
 	if err != nil {
 		return err
 	}
 	for _, coll := range colls {
-		delay, batch, rt := collMatch(coll)
+		delay, batch, rt := ms.collMatch(coll)
 		if delay == -1 || rt {
 			continue
 		}
 		// we copy only ST collections which do not have a bookmark in collSyncStartFrom
-		if _, ok := collSyncStartFrom[coll]; !ok {
-			lastSyncId, err := getLastSyncId(ctx, sender)
+		if _, ok := ms.collSyncId[coll]; !ok {
+			lastSyncId, err := getLastSyncId(ctx, ms.Sender)
 			if err != nil {
 				return fmt.Errorf("Can't fetch SyncId to start replication after collection %s clone: %w", coll, err)
 			}
-			if err := syncCollection(ctx, sender, receiver, coll, batch, putOp); err != nil {
+			if err := ms.syncCollection(ctx, coll, batch, lastSyncId); err != nil {
 				return fmt.Errorf("failed to clone collection %s to receiver: %w", coll, err)
 			}
-			collSyncStartFrom[coll] = lastSyncId
+			ms.collSyncId[coll] = lastSyncId
 		}
 	}
 	return nil

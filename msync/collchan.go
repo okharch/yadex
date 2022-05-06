@@ -10,7 +10,7 @@ import (
 
 // getCollChan returns channel of Oplog for the collection.
 // it launches goroutine which pops operation from that channel and flushes BulkWriteOp using putBWOp func
-func (ms *MongoSync) getCollChan(collName string, maxDelay, maxBatch int, realtime bool, putBWOp putBulkWriteOp) chan<- bson.Raw {
+func (ms *MongoSync) getCollChan(collName string, maxDelay, maxBatch int, realtime bool) chan<- bson.Raw {
 	in := make(chan bson.Raw)
 	// buffer for BulkWrite
 	var models []mongo.WriteModel
@@ -32,7 +32,9 @@ func (ms *MongoSync) getCollChan(collName string, maxDelay, maxBatch int, realti
 			bwOp.Models = models
 		}
 		models = nil
-		putBWOp(bwOp)
+		ms.collCountChan <- collCount{coll: collName, count: len(models)}
+
+		ms.putBwOp(bwOp)
 	}
 	// process channel of Oplog, collects similar operation to batches, flushing them to bulkWriteChan
 	go func() { // oplog for collection
@@ -83,6 +85,7 @@ func (ms *MongoSync) getCollChan(collName string, maxDelay, maxBatch int, realti
 					}
 				}()
 			}
+			ms.collCountChan <- collCount{coll: collName, count: len(models)}
 		}
 	}()
 	return in

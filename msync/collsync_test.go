@@ -11,8 +11,14 @@ import (
 )
 
 var ExchCfg = &config.ExchangeConfig{
-	SenderURI:   "mongodb://localhost:27021",
-	SenderDB:    "test",
+	SenderURI: "mongodb://localhost:27021",
+	SenderDB:  "test",
+	ST: map[string]*config.DataSync{"test": {
+		Delay:   100,
+		Batch:   100,
+		Exclude: nil,
+	},
+	},
 	ReceiverURI: "mongodb://localhost:27023",
 	ReceiverDB:  "test",
 }
@@ -47,16 +53,15 @@ func TestSyncCollection(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, numDocs, int64(len(res.InsertedIDs)))
 	//mIds := Ids2Map(res.InsertedIDs)
-	putOp := func(bwOp *BulkWriteOp) {
-		bwr, err := ms.Receiver.Collection(bwOp.Coll).BulkWrite(ctx, bwOp.Models)
-		require.NoError(t, err)
-		require.Equal(t, int64(len(bwOp.Models)), bwr.InsertedCount)
-		return
-	}
-	err = syncCollection(ctx, ms.Sender, ms.Receiver, "test", 100, putOp)
+	ms.InitBulkWriteChan(ctx)
+	lastSyncId, err := getLastSyncId(ctx, ms.Sender)
 	require.NoError(t, err)
+	err = ms.syncCollection(ctx, "test", 100, lastSyncId)
+	require.NoError(t, err)
+	count, err := ms.Receiver.Collection(collName).CountDocuments(ctx, bson.M{"_id": bson.M{"$in": res.InsertedIDs}})
+	require.NoError(t, err)
+	require.Equal(t, numDocs, count)
 	cancel()
-	waitSync.Wait()
 }
 
 // TestSyncCollection2Steps test
@@ -72,7 +77,7 @@ func TestSyncCollectionMultiple(t *testing.T) {
 	require.NotNil(t, ms)
 	require.NoError(t, err)
 	const collName = "test"
-	const numDocs = int64(100000)
+	const numDocs = int64(1000)
 	coll := ms.Sender.Collection(collName)
 	err = coll.Drop(ctx)
 	require.NoError(t, err)
@@ -80,20 +85,19 @@ func TestSyncCollectionMultiple(t *testing.T) {
 	receiverColl := ms.Receiver.Collection(collName)
 	err = receiverColl.Drop(ctx)
 	require.NoError(t, err)
-	putOp := func(bwOp *BulkWriteOp) {
-		bwr, err := ms.Receiver.Collection(bwOp.Coll).BulkWrite(ctx, bwOp.Models)
-		require.NoError(t, err)
-		require.Equal(t, int64(len(bwOp.Models)), bwr.InsertedCount)
-		return
-	}
 
+	ms.InitBulkWriteChan(ctx)
 	for i := int64(0); i <= 3; i++ {
 		// insert another 1000
 		res, err := coll.InsertMany(ctx, CreateDocs(numDocs*i+1, numDocs))
 		require.NoError(t, err)
 		require.Equal(t, numDocs, int64(len(res.InsertedIDs)))
-		err = syncCollection(ctx, ms.Sender, ms.Receiver, "test", 100, putOp)
+		lastSyncId, err := getLastSyncId(ctx, ms.Sender)
 		require.NoError(t, err)
+		err = ms.syncCollection(ctx, "test", 200, lastSyncId)
+		require.NoError(t, err)
+		// make sure channel is empty
+		ms.WaitFlushed()
 		// check all records inserted
 		c, err := receiverColl.CountDocuments(ctx, bson.D{})
 		require.NoError(t, err)

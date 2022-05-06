@@ -9,14 +9,10 @@ import (
 
 func TestGetCollChan(t *testing.T) {
 	bwChan := make(chan *BulkWriteOp)
-	putBwOp := func(bwOp *BulkWriteOp) {
-		bwChan <- bwOp
-		return
-	}
 	const maxDelay = 200
 	const maxBatch = 3
 	var ms MongoSync
-	ch := ms.getCollChan("testcol", maxDelay, maxBatch, true, putBwOp)
+	ch := ms.getCollChan("testcol", maxDelay, maxBatch, true)
 	waitResult := func(delay int) (received bool, bwOp *BulkWriteOp) {
 		// ch is empty, should expire 100ms with no input
 		select {
