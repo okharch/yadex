@@ -3,6 +3,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	log "github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -60,7 +61,7 @@ func GetDbOpLog(ctx context.Context, db *mongo.Database, syncId string) (<-chan 
 				continue
 			}
 			//if errors.Is(err, context.DeadlineExceeded) {
-			//	// trigger idle operation on timeout
+			//	// trigger checkIdle operation on timeout
 			//	ch <- nil
 			//	continue
 			//}
@@ -104,4 +105,112 @@ func getLastSyncId(ctx context.Context, sender *mongo.Database) (string, error) 
 		return "", err
 	}
 	return op["_id"].(bson.M)["_data"].(string), nil
+}
+
+type CollSync struct {
+	SyncId   string    `bson:"sync_id"`
+	CollName string    `bson:"_id"`
+	Updated  time.Time `bson:"updated"`
+}
+
+// fetchCollSyncId fetches sync_id from bookmarkCollSyncId(sync_id, collection_name) sorted by sync_id
+func fetchCollSyncId(ctx context.Context, bookmarkCollSyncId *mongo.Collection) (documents []CollSync, err error) {
+	findOptions := options.Find()
+	// Sort by `sync_id` field ascending
+	findOptions.SetSort(bson.D{{"sync_id", 1}})
+	cur, err := bookmarkCollSyncId.Find(ctx, allRecords, findOptions)
+	if err != nil {
+		return nil, fmt.Errorf("fetchCollSyncId: can't read from %s : %w", bookmarkCollSyncId.Name(), err)
+	}
+	if err := cur.All(ctx, &documents); err != nil {
+		return nil, fmt.Errorf("fetchCollSyncId: can't fetch documents from sender.%s : %w", bookmarkCollSyncId.Name(), err)
+	}
+	return documents, nil
+}
+
+// resumeOplog finds out minimal sync_id from collMSync collection.
+// which it can successfully resume oplog watch.
+// it returns collSyncId map for all collections that has greater sync_id.
+// if it fails to resume from any stored sync_id it starts from current oplog
+// and returns empty collSyncId
+func (ms *MongoSync) resumeOplog(ctx context.Context) error {
+	csBookmarks, err := fetchCollSyncId(ctx, ms.CollSyncId)
+	if ctx.Err() != nil {
+		return ctx.Err() // gracefully handle sync.Stop
+	}
+	if err != nil {
+		log.Warn(err)
+	}
+	ms.collSyncId = make(map[string]string, len(csBookmarks))
+	for _, b := range csBookmarks {
+		if ms.oplog == nil {
+			ms.oplog, err = GetDbOpLog(ctx, ms.Sender, b.SyncId)
+			if ms.oplog != nil {
+				log.Infof("sync was resumed from (%s) %s", b.CollName, b.SyncId)
+			}
+		}
+		if ms.oplog != nil {
+			// store all syncId that is greater than
+			// from what we are resuming sync for each collection,
+			// so, we know whether to ignore oplog related to that coll until it comes to collSyncId
+			ms.collSyncId[b.CollName] = b.SyncId
+		}
+	}
+	if ms.oplog == nil { // give up on resume, start from current state after cloning collections
+		ms.oplog, err = GetDbOpLog(ctx, ms.Sender, "")
+	}
+	return err
+}
+
+// processOpLog handles incoming oplog entries from oplog channel.
+// It finds out which collection that oplog record belongs.
+// If a channel for handling that collection has not been created,
+// it calls getCollChan func to create that channel.
+// Then it redirects oplog entry to that channel.
+// If SyncId for that oplog is equal or greater than syncId for the collection
+func (ms *MongoSync) processOpLog() {
+	// each collection has separate channel for receiving its events.
+	// that channel is served by dedicated goroutine
+	ms.collChan = make(map[string]chan<- bson.Raw, 128)
+	defer func() {
+		// close channels for oplog operations
+		for _, ch := range ms.collChan {
+			ch <- nil // flush them before closing
+			close(ch)
+		}
+	}()
+	ms.initIdle()
+	// loop until context tells we are done
+	for op := range ms.oplog {
+		// nil op means there was timeout, so supposedly there is no incoming oplog events
+		if op == nil {
+			ms.checkIdle()
+			continue
+		}
+		// find out the name of the collection
+		// check if it is synced
+		coll := getColl(op)
+		delay, batch, rt := ms.collMatch(coll)
+		if delay == -1 {
+			continue // ignore sync for this collection
+		}
+		// find out the channel for collection
+		if ch, ok := ms.collChan[coll]; ok {
+			// if a channel is there - the sync is underway, no need for other checks
+			ch <- op
+			continue
+		}
+		if !rt {
+			// check whether we reached syncId to start collection sync
+			syncId := getSyncId(op)
+			if startFrom, ok := ms.collSyncId[coll]; ok && syncId < startFrom {
+				// ignore operation while current sync_id is less than collection's one
+				continue
+			}
+			log.Debugf("start follow coll %s from %s", coll, syncId)
+		}
+		// now establish handling channel for that collection so the next op can be handled
+		ms.collChan[coll] = ms.getCollChan(coll, delay, batch, rt)
+		ms.collChan[coll] <- op
+	}
 }

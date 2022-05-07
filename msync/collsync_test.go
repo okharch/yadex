@@ -97,7 +97,7 @@ func TestSyncCollectionMultiple(t *testing.T) {
 		err = ms.syncCollection(ctx, "test", 200, lastSyncId)
 		require.NoError(t, err)
 		// make sure channel is empty
-		ms.WaitFlushed()
+		ms.WaitIdle()
 		// check all records inserted
 		c, err := receiverColl.CountDocuments(ctx, bson.D{})
 		require.NoError(t, err)

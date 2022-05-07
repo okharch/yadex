@@ -88,5 +88,6 @@ func (ms *MongoSync) getCollChan(collName string, maxDelay, maxBatch int, realti
 			ms.collCountChan <- collCount{coll: collName, count: len(models)}
 		}
 	}()
+
 	return in
 }

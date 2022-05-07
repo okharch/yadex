@@ -81,14 +81,14 @@ func TestSync(t *testing.T) {
 	}
 	require.NoError(t, err)
 	//time.Sleep(time.Second/2)
-	ms.WaitFlushed()
+	ms.WaitIdle()
 	//time.Sleep(time.Millisecond*200)
 	filter := bson.M{"_id": ir.InsertedID}
 	c, err := receiverColl.CountDocuments(ctx, filter)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), c)
 	//time.Sleep(time.Second/2)
-	ms.WaitFlushed()
+	ms.WaitIdle()
 	c, err = receiverColl.CountDocuments(ctx, bson.M{"_id": bson.M{"$in": ids}})
 	require.NoError(t, err)
 	require.Equal(t, countMany*countLoop, c)

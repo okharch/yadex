@@ -6,10 +6,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
+	"yadex/mdb"
 )
 
 func TestGetDbOpLog(t *testing.T) {
-	client, available, err := ConnectMongo(context.TODO(), "mongodb://localhost:27021")
+	client, available, err := mdb.ConnectMongo(context.TODO(), "mongodb://localhost:27021")
 	require.NoError(t, err)
 	require.NotNil(t, client)
 	require.NotNil(t, available)
