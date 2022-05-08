@@ -11,12 +11,13 @@ import (
 // getCollChan returns channel of Oplog for the collection.
 // it launches goroutine which pops operation from that channel and flushes BulkWriteOp using putBWOp func
 func (ms *MongoSync) getCollChan(collName string, maxDelay, maxBatch int, realtime bool) chan<- bson.Raw {
-	in := make(chan bson.Raw)
+	in := make(chan bson.Raw, 1) // non-blocking, otherwise setCollUpdateTotal might deadlock
 	// buffer for BulkWrite
 	var models []mongo.WriteModel
 	lastOpType := OpLogUnknown
 	var lastOp bson.Raw
 	flushTimer, ftCancel := context.WithCancel(context.Background())
+	totalBytes := 0
 	// flush bulkWrite models or drop operation into BulkWrite channel
 	flush := func() {
 		ftCancel()
@@ -30,10 +31,11 @@ func (ms *MongoSync) getCollChan(collName string, maxDelay, maxBatch int, realti
 		bwOp := &BulkWriteOp{Coll: collName, RealTime: realtime, OpType: lastOpType, SyncId: syncId}
 		if lastOpType != OpLogDrop {
 			bwOp.Models = models
+			bwOp.TotalBytes = totalBytes
 		}
 		models = nil
-		ms.collCountChan <- collCount{coll: collName, count: len(models)}
-
+		totalBytes = 0
+		ms.setCollUpdateTotal(collName, totalBytes)
 		ms.putBwOp(bwOp)
 	}
 	// process channel of Oplog, collects similar operation to batches, flushing them to bulkWriteChan
@@ -67,6 +69,8 @@ func (ms *MongoSync) getCollChan(collName string, maxDelay, maxBatch int, realti
 			lastOpType = opType
 			lastOp = op
 			models = append(models, writeModel)
+			ms.setCollUpdateTotal(collName, totalBytes)
+			totalBytes += len(op)
 			if len(models) >= maxBatch {
 				flush()
 			} else if len(models) == 1 {
@@ -85,7 +89,6 @@ func (ms *MongoSync) getCollChan(collName string, maxDelay, maxBatch int, realti
 					}
 				}()
 			}
-			ms.collCountChan <- collCount{coll: collName, count: len(models)}
 		}
 	}()
 

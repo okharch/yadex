@@ -16,11 +16,10 @@ import (
 // collection stores last sync_id for each individual collection being synced - so it can resume sync from that point
 const CollSyncIdDbName = "mongoSync"
 
-// InitBulkWriteChan creates bwChan chan *BulkWriteOp field which is used to add bulkWrite operation to buffered channel
-// this function puts BulkWrite operation only if this is RealTime op or channel is clean
-// it launches goroutine which serves  operation from that channel and
-// 1. sends bulkWrites to receiver mongodb
-// 2. stores sync_id into CollSyncId for the ST collection on successful sync operation
+// InitBulkWriteChan creates bwRT and bwST chan *BulkWriteOp  used to add bulkWrite operation to buffered channel
+// also it initializes collection CollSyncId to update sync progress
+// bwPut channel is used for signalling there is pending BulkWrite op
+// it launches serveBWChan goroutine which serves  operation from those channel and
 func (ms *MongoSync) InitBulkWriteChan(ctx context.Context) {
 	// get name of bookmarkColSyncid on sender
 	bookmarkColSyncIdName := strings.Join([]string{ms.Config.SenderURI, ms.Config.SenderDB, ms.Config.ReceiverURI, ms.Config.ReceiverDB},
@@ -29,89 +28,101 @@ func (ms *MongoSync) InitBulkWriteChan(ctx context.Context) {
 	bookmarkColSyncIdName = reNotId.ReplaceAllLiteralString(bookmarkColSyncIdName, "-")
 	ms.CollSyncId = ms.senderClient.Database(CollSyncIdDbName).Collection(bookmarkColSyncIdName)
 	// create buffered (3) BulkWrite channel
-	ms.bwChan = make(chan *BulkWriteOp, 3)
-	// ChanBusy is used to implement privileged access to BulkWriteOp channel for RT vs ST ops
-	// it counts how many ops were put into the channel
-	// ST ops always wait before  channel is empty and only then it is being put into channel
-	// this goroutine serves BulkWriteOp channel
-	serveBWChan := func() {
-		for bwOp := range ms.bwChan {
-			// check if context is not expired
-			if ctx.Err() != nil {
-				return
-			}
-			collAtReceiver := ms.Receiver.Collection(bwOp.Coll)
-			if bwOp.OpType == OpLogDrop {
-				log.Tracef("drop Receiver.%s", bwOp.Coll)
-				if err := collAtReceiver.Drop(ctx); err != nil {
-					log.Warnf("failed to drop collection %s at the receiver:%s", bwOp.Coll, err)
-				}
-			} else {
-				ordered := bwOp.OpType == OpLogOrdered
-				optOrdered := &options.BulkWriteOptions{Ordered: &ordered}
-				if len(bwOp.Models) > 0 {
-					r, err := collAtReceiver.BulkWrite(ctx, bwOp.Models, optOrdered)
-					if err != nil {
-						// here we do not consider "DuplicateKey" as an error.
-						// If the record with DuplicateKey is already on the receiver - it is fine
-						if ordered || !mongo.IsDuplicateKeyError(err) {
-							log.Errorf("failed BulkWrite to receiver.%s: %s", bwOp.Coll, err)
-						}
-					} else {
-						log.Tracef("BulkWrite %s:%+v", bwOp.Coll, r)
-					}
-				}
-			}
-			// update sync_id for the ST collection
-			if !bwOp.RealTime && bwOp.SyncId != "" {
-				upsert := true
-				optUpsert := &options.ReplaceOptions{Upsert: &upsert}
-				id := bson.E{Key: "_id", Value: bwOp.Coll}
-				syncId := bson.E{Key: "sync_id", Value: bwOp.SyncId}
-				updated := bson.E{"updated", primitive.NewDateTimeFromTime(time.Now())}
-				filter := bson.D{id}
-				doc := bson.D{id, syncId, updated}
-				if r, err := ms.CollSyncId.ReplaceOne(ctx, filter, doc, optUpsert); err != nil {
-					log.Warnf("failed to update sync_id for collAtReceiver %s: %s", bwOp.Coll, err)
-				} else {
-					log.Tracef("Coll found(updated) %d(%d) %s.sync_id %s", r.MatchedCount, r.UpsertedCount+r.ModifiedCount, bwOp.Coll,
-						bwOp.SyncId)
-				}
-			}
-			ms.ChanBusy.Done()
-		}
-	}
+	ms.bwRT = make(chan *BulkWriteOp, 3)
+	ms.bwST = make(chan *BulkWriteOp, 1)
+	ms.bwPut = make(chan struct{}, 3)
+
 	// runSync few parallel serveBWChan() goroutines
 	for i := 0; i < 2; i++ {
-		go serveBWChan()
+		ms.routines.Add(1)
+		go ms.serveBWChan(ctx)
 	}
-
 }
 
-// putBwOp puts BulkWriteOp to BulkWriteChan.
-// special value nil is used to make sure bwChan is empty
-// It respects RT vs ST priority.
-// It puts RT bwOp without delay
-// It will wait until channel is empty and only then will put ST bwOp
+// serveBWChan watches for any incoming BulkWrite operation
+// then it first checks bwRT channel, if it is empty
+// it gets BW op from bwST channel
+// it uses BulkWriteOp method to send that BWOp to the receiver
+func (ms *MongoSync) serveBWChan(ctx context.Context) {
+	defer ms.routines.Done()
+	for {
+		// blocking wait any BulkWrite put to either channel
+		select {
+		case <-ctx.Done():
+			return
+		case <-ms.bwPut:
+		}
+		// either RT or ST pending
+		// non-blocking check RT
+		select {
+		case bwOp := <-ms.bwRT:
+			ms.BulkWriteOp(ctx, bwOp)
+			continue
+		default:
+		}
+		// non-blocking check ST
+		select {
+		case bwOp := <-ms.bwST:
+			ms.BulkWriteOp(ctx, bwOp)
+		default:
+		}
+	}
+}
+
+// putBwOp puts BulkWriteOp to either RT or ST channel for BulkWrite operations.
+// Also, it puts signal to bwPut channel to inform serveBWChan
+// there is a pending event in either of two channels.
 func (ms *MongoSync) putBwOp(bwOp *BulkWriteOp) {
 	//log.Debugf("putBwOp: %s %v %d", bwOp.Coll,bwOp.OpType, len(bwOp.Models))
-	if bwOp != nil && bwOp.RealTime {
-		ms.ChanBusy.Add(1)
+	if bwOp.RealTime {
+		ms.bwRT <- bwOp
 	} else {
-		// this mutex needed to avoid two or more separate ST finding that channel is empty.
-		// before waiting, it Locks and after ChanBusy.Add(1) it unlocks so
-		// next ST will be waiting until channel is empty again
-		ms.bwChanBusy.Lock() // one ST at a time
-		//log.Debugf("putBwOp.Wait: %s %v %d", bwOp.Coll,bwOp.OpType, len(bwOp.Models))
-		ms.ChanBusy.Wait() // wait until channel is clean
-		if bwOp != nil {
-			ms.ChanBusy.Add(1)
+		ms.bwST <- bwOp
+	}
+	ms.addCollsBulkWriteTotal(bwOp.TotalBytes)
+	ms.bwPut <- struct{}{}
+}
+
+// BulkWriteOp BulkWrite bwOp.Models to sender, updates SyncId for the bwOp.Coll
+func (ms *MongoSync) BulkWriteOp(ctx context.Context, bwOp *BulkWriteOp) {
+	collAtReceiver := ms.Receiver.Collection(bwOp.Coll)
+	if bwOp.OpType == OpLogDrop {
+		log.Tracef("drop Receiver.%s", bwOp.Coll)
+		if err := collAtReceiver.Drop(ctx); err != nil {
+			log.Warnf("failed to drop collection %s at the receiver:%s", bwOp.Coll, err)
 		}
-		ms.bwChanBusy.Unlock()
+		return
 	}
-	//log.Debugf("putBwOp->channel: %s %v %d", bwOp.Coll,bwOp.OpType, len(bwOp.Models))
-	if bwOp != nil {
-		ms.bwChan <- bwOp
+	ordered := bwOp.OpType == OpLogOrdered
+	optOrdered := &options.BulkWriteOptions{Ordered: &ordered}
+	ms.bw.Add(1)
+	r, err := collAtReceiver.BulkWrite(ctx, bwOp.Models, optOrdered)
+	ms.addCollsBulkWriteTotal(-bwOp.TotalBytes)
+	ms.bw.Done()
+	if err != nil {
+		// here we do not consider "DuplicateKey" as an error.
+		// If the record with DuplicateKey is already on the receiver - it is fine
+		if ordered || !mongo.IsDuplicateKeyError(err) {
+			log.Errorf("failed BulkWrite to receiver.%s: %s", bwOp.Coll, err)
+			return
+		}
+	} else {
+		log.Tracef("BulkWrite %s:%+v", bwOp.Coll, r)
 	}
-	return
+	// update SyncId for the collection
+	if !bwOp.RealTime && bwOp.SyncId != "" {
+		upsert := true
+		optUpsert := &options.ReplaceOptions{Upsert: &upsert}
+		id := bson.E{Key: "_id", Value: bwOp.Coll}
+		syncId := bson.E{Key: "sync_id", Value: bwOp.SyncId}
+		updated := bson.E{Key: "updated", Value: primitive.NewDateTimeFromTime(time.Now())}
+		filter := bson.D{id}
+		doc := bson.D{id, syncId, updated}
+		if r, err := ms.CollSyncId.ReplaceOne(ctx, filter, doc, optUpsert); err != nil {
+			log.Warnf("failed to update sync_id for collAtReceiver %s: %s", bwOp.Coll, err)
+		} else {
+			log.Tracef("Coll found(updated) %d(%d) %s.sync_id %s", r.MatchedCount, r.UpsertedCount+r.ModifiedCount, bwOp.Coll,
+				bwOp.SyncId)
+		}
+	}
 }

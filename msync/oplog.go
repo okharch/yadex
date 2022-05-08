@@ -35,7 +35,7 @@ func getChangeStream(ctx context.Context, sender *mongo.Database, syncId string)
 	return sender.Watch(ctx, pipeline, opts)
 }
 
-func GetDbOpLog(ctx context.Context, db *mongo.Database, syncId string) (<-chan bson.Raw, error) {
+func (ms *MongoSync) GetDbOpLog(ctx context.Context, db *mongo.Database, syncId string) (<-chan bson.Raw, error) {
 	changeStream, err := getChangeStream(ctx, db, syncId)
 	if err != nil {
 		return nil, err
@@ -44,27 +44,19 @@ func GetDbOpLog(ctx context.Context, db *mongo.Database, syncId string) (<-chan 
 	go func() {
 		defer close(ch)
 		for {
-			ctxTimeout, cancel := context.WithTimeout(ctx, time.Millisecond*500)
-			success := changeStream.Next(ctxTimeout)
-			errCtx := ctxTimeout.Err()
-			err := changeStream.Err()
-			cancel()
-			if errors.Is(errCtx, context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
-				ch <- nil
-				continue
+			success := changeStream.TryNext(ctx)
+			if !success {
+				ms.idleChan <- true
+				success = changeStream.Next(ctx)
 			}
+			ms.idleChan <- false
 			if success {
 				ch <- changeStream.Current
 			}
-			//err = changeStream.Err()
+			err = changeStream.Err()
 			if err == nil {
 				continue
 			}
-			//if errors.Is(err, context.DeadlineExceeded) {
-			//	// trigger checkIdle operation on timeout
-			//	ch <- nil
-			//	continue
-			//}
 			if errors.Is(err, context.Canceled) {
 				log.Info("Process oplog gracefully shutdown")
 			} else {
@@ -97,7 +89,7 @@ func getLastSyncId(ctx context.Context, sender *mongo.Database) (string, error) 
 		_ = coll.Drop(ctx)
 	}()
 	// make some update to generate oplog
-	if _, err := coll.InsertOne(ctx, bson.M{"count": 1}); err != nil {
+	if _, err := coll.InsertOne(ctx, bson.M{"DirtyDocs": 1}); err != nil {
 		return "", err
 	}
 	op, err := getOpLog(ctx, changeStreamLastSync)
@@ -144,7 +136,7 @@ func (ms *MongoSync) resumeOplog(ctx context.Context) error {
 	ms.collSyncId = make(map[string]string, len(csBookmarks))
 	for _, b := range csBookmarks {
 		if ms.oplog == nil {
-			ms.oplog, err = GetDbOpLog(ctx, ms.Sender, b.SyncId)
+			ms.oplog, err = ms.GetDbOpLog(ctx, ms.Sender, b.SyncId)
 			if ms.oplog != nil {
 				log.Infof("sync was resumed from (%s) %s", b.CollName, b.SyncId)
 			}
@@ -157,7 +149,7 @@ func (ms *MongoSync) resumeOplog(ctx context.Context) error {
 		}
 	}
 	if ms.oplog == nil { // give up on resume, start from current state after cloning collections
-		ms.oplog, err = GetDbOpLog(ctx, ms.Sender, "")
+		ms.oplog, err = ms.GetDbOpLog(ctx, ms.Sender, "")
 	}
 	return err
 }
@@ -182,11 +174,6 @@ func (ms *MongoSync) processOpLog() {
 	ms.initIdle()
 	// loop until context tells we are done
 	for op := range ms.oplog {
-		// nil op means there was timeout, so supposedly there is no incoming oplog events
-		if op == nil {
-			ms.checkIdle()
-			continue
-		}
 		// find out the name of the collection
 		// check if it is synced
 		coll := getColl(op)
@@ -210,7 +197,9 @@ func (ms *MongoSync) processOpLog() {
 			log.Debugf("start follow coll %s from %s", coll, syncId)
 		}
 		// now establish handling channel for that collection so the next op can be handled
+		ms.idleMutex.Lock()
 		ms.collChan[coll] = ms.getCollChan(coll, delay, batch, rt)
+		ms.idleMutex.Unlock()
 		ms.collChan[coll] <- op
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"sync"
 	"testing"
+	"time"
 	"yadex/config"
 )
 
@@ -81,14 +82,14 @@ func TestSync(t *testing.T) {
 	}
 	require.NoError(t, err)
 	//time.Sleep(time.Second/2)
-	ms.WaitIdle()
+	ms.WaitIdle(time.Millisecond * 20)
 	//time.Sleep(time.Millisecond*200)
 	filter := bson.M{"_id": ir.InsertedID}
 	c, err := receiverColl.CountDocuments(ctx, filter)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), c)
 	//time.Sleep(time.Second/2)
-	ms.WaitIdle()
+	ms.WaitIdle(time.Millisecond * 20)
 	c, err = receiverColl.CountDocuments(ctx, bson.M{"_id": bson.M{"$in": ids}})
 	require.NoError(t, err)
 	require.Equal(t, countMany*countLoop, c)

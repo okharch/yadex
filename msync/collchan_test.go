@@ -76,5 +76,5 @@ func TestGetCollChan(t *testing.T) {
 	require.Equal(t, "testcol", bwOp.Coll)
 	require.Equal(t, 1, len(bwOp.Models))
 	require.Equal(t, OpLogUnordered, bwOp.OpType)
-	ms.Sync.Wait()
+	ms.routines.Wait()
 }
