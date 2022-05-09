@@ -44,11 +44,14 @@ func (ms *MongoSync) GetDbOpLog(ctx context.Context, db *mongo.Database, syncId 
 	go func() {
 		defer close(ch)
 		for {
+			// try nowait Next
 			success := changeStream.TryNext(ctx)
 			if !success {
+				// no pending ops, send idleState update
 				ms.idleChan <- true
 				success = changeStream.Next(ctx)
 			}
+			// set IdleState = false
 			ms.idleChan <- false
 			if success {
 				ch <- changeStream.Current

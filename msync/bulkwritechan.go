@@ -95,10 +95,8 @@ func (ms *MongoSync) BulkWriteOp(ctx context.Context, bwOp *BulkWriteOp) {
 	}
 	ordered := bwOp.OpType == OpLogOrdered
 	optOrdered := &options.BulkWriteOptions{Ordered: &ordered}
-	ms.bw.Add(1)
 	r, err := collAtReceiver.BulkWrite(ctx, bwOp.Models, optOrdered)
 	ms.addCollsBulkWriteTotal(-bwOp.TotalBytes)
-	ms.bw.Done()
 	if err != nil {
 		// here we do not consider "DuplicateKey" as an error.
 		// If the record with DuplicateKey is already on the receiver - it is fine

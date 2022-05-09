@@ -116,7 +116,7 @@ func MakeWatchConfigChannel(ctx context.Context, configFileName string) chan *Co
 
 func SetLogger() {
 	//log.SetFormatter(Formatter)
-	log.SetLevel(log.DebugLevel)
+	log.SetLevel(log.TraceLevel)
 	log.SetReportCaller(true)
 	Formatter := new(log.TextFormatter)
 	Formatter.TimestampFormat = "2006-01-02T15:04:05.999999999Z07:00"

@@ -46,7 +46,6 @@ type MongoSync struct {
 	bwPut             chan struct{}     // triggered when there is pending RT or ST bulkWrite in above bwRT/bwST channels
 	Config            *config.ExchangeConfig
 	collSyncId        map[string]string
-	bw                sync.WaitGroup // pending BulkWrite
 	routines          sync.WaitGroup // housekeeping of runSync. it is zero on exit
 	CollSyncId        *mongo.Collection
 	oplog             Oplog

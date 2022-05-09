@@ -1,6 +1,7 @@
 package mongosync
 
 import (
+	log "github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"time"
 )
@@ -22,6 +23,7 @@ func (ms *MongoSync) initIdle() {
 func (ms *MongoSync) setIdleState(idleState bool) {
 	ms.idleMutex.Lock()
 	ms.idleState = idleState
+	log.Tracef("idleState : %v", ms.idleState)
 	ms.idleMutex.Unlock()
 }
 
@@ -41,6 +43,7 @@ func (ms *MongoSync) addCollsBulkWriteTotal(delta int) {
 	ms.collBulkWriteMutex.Lock()
 	defer ms.collBulkWriteMutex.Unlock()
 	ms.collsBulkWriteTotal += delta
+	log.Tracef("CollsBulkWriteTotal : %d", ms.collsBulkWriteTotal)
 }
 
 // idle follows idleChan and maintains idleState variable
@@ -68,6 +71,7 @@ func (ms *MongoSync) flushUpdates() {
 	}
 	var collChan chan<- bson.Raw
 	if maxTotal != 0 {
+		log.Debugf("flushing coll %s %d bytes", maxColl, maxTotal)
 		collChan = ms.collChan[maxColl]
 		collChan <- nil // flush
 	}
@@ -85,13 +89,13 @@ func (ms *MongoSync) setCollUpdateTotal(coll string, total int) {
 		ms.collUpdateTotal[coll] = total
 	}
 	ms.collsUpdateTotal += total - oldTotal
+	log.Tracef("collsUpdateTotal : %v", ms.collsUpdateTotal)
 }
 
 // WaitIdle detects situation when there is no pending input/output
 func (ms *MongoSync) WaitIdle(timeout time.Duration) {
 	for {
 		time.Sleep(timeout)
-		ms.bw.Wait()
 		if ms.getIdleState() && ms.getCollsUpdateTotal() == 0 && ms.getCollsBulkWriteTotal() == 0 {
 			return
 		}
