@@ -15,8 +15,8 @@ var ExchCfg = &config.ExchangeConfig{
 	SenderURI: "mongodb://localhost:27021",
 	SenderDB:  "test",
 	ST: map[string]*config.DataSync{"test": {
-		Delay:   100,
-		Batch:   100,
+		Delay:   10,
+		Batch:   97,
 		Exclude: nil,
 	},
 	},
@@ -44,24 +44,31 @@ func TestSyncCollection(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, ms)
 	const collName = "test"
-	const numDocs = int64(1000)
+	const numDocs = int64(113)
 	coll := ms.Receiver.Collection(collName)
 	require.NoError(t, coll.Drop(ctx))
 	coll = ms.Sender.Collection(collName)
 	err = coll.Drop(ctx)
 	require.NoError(t, err)
+	// create coll at sender
 	res, err := coll.InsertMany(ctx, CreateDocs(1, numDocs))
 	require.NoError(t, err)
 	require.Equal(t, numDocs, int64(len(res.InsertedIDs)))
-	//mIds := Ids2Map(res.InsertedIDs)
 	ms.InitBulkWriteChan(ctx)
 	lastSyncId, err := getLastSyncId(ctx, ms.Sender)
 	require.NoError(t, err)
-	err = ms.syncCollection(ctx, "test", 100, lastSyncId)
+	// run syncCollection to transfer coll from sender to receiver
+	err = ms.syncCollection(ctx, "test", 97, lastSyncId)
 	require.NoError(t, err)
+	// there is no oplog, idle must be set manually
+	ms.setIdleState(true)
+	// wait until data transferred through BulkWrite channel
+	ms.WaitIdle(time.Millisecond)
+	// now check what we have received at the receiver
 	count, err := ms.Receiver.Collection(collName).CountDocuments(ctx, bson.M{"_id": bson.M{"$in": res.InsertedIDs}})
 	require.NoError(t, err)
 	require.Equal(t, numDocs, count)
+	// terminate ms sync
 	cancel()
 }
 
@@ -71,6 +78,7 @@ func TestSyncCollection(t *testing.T) {
 // 3. insert another 100000 records
 // 4. sync to the receiver. This time it should be 100000 records copied, not 200000
 func TestSyncCollectionMultiple(t *testing.T) {
+	config.SetLogger()
 	ctx, cancel := context.WithCancel(context.TODO())
 	var waitSync sync.WaitGroup
 	ms, err := NewMongoSync(ctx, ExchCfg, &waitSync)
@@ -78,7 +86,7 @@ func TestSyncCollectionMultiple(t *testing.T) {
 	require.NotNil(t, ms)
 	require.NoError(t, err)
 	const collName = "test"
-	const numDocs = int64(1000)
+	const numDocs = int64(101)
 	coll := ms.Sender.Collection(collName)
 	err = coll.Drop(ctx)
 	require.NoError(t, err)
@@ -87,6 +95,8 @@ func TestSyncCollectionMultiple(t *testing.T) {
 	err = receiverColl.Drop(ctx)
 	require.NoError(t, err)
 
+	// there is no oplog, idle must be set manually
+	ms.setIdleState(true)
 	ms.InitBulkWriteChan(ctx)
 	for i := int64(0); i <= 3; i++ {
 		// insert another 1000
@@ -95,10 +105,10 @@ func TestSyncCollectionMultiple(t *testing.T) {
 		require.Equal(t, numDocs, int64(len(res.InsertedIDs)))
 		lastSyncId, err := getLastSyncId(ctx, ms.Sender)
 		require.NoError(t, err)
-		err = ms.syncCollection(ctx, "test", 200, lastSyncId)
+		err = ms.syncCollection(ctx, "test", 217, lastSyncId)
 		require.NoError(t, err)
-		// make sure channel is empty
-		ms.WaitIdle(time.Millisecond * 20)
+		// wait until data transferred through BulkWrite channel
+		ms.WaitIdle(time.Millisecond * 50)
 		// check all records inserted
 		c, err := receiverColl.CountDocuments(ctx, bson.D{})
 		require.NoError(t, err)
