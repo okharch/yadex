@@ -5,7 +5,6 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson"
-	"sync"
 	"testing"
 	"time"
 	"yadex/config"
@@ -37,10 +36,9 @@ func CreateDocs(start, numRecs int64) []interface{} {
 // 2. copies it to the receiver using syncCollection routine
 // 3. checks 1000 records delivered
 func TestSyncCollection(t *testing.T) {
-	config.SetLogger()
+	config.SetLogger(log.InfoLevel)
 	ctx, cancel := context.WithCancel(context.TODO())
-	var waitSync sync.WaitGroup
-	ms, err := NewMongoSync(ctx, ExchCfg, &waitSync)
+	ms, err := NewMongoSync(ctx, ExchCfg)
 	require.NoError(t, err)
 	require.NotNil(t, ms)
 	const collName = "test"
@@ -54,16 +52,15 @@ func TestSyncCollection(t *testing.T) {
 	res, err := coll.InsertMany(ctx, CreateDocs(1, numDocs))
 	require.NoError(t, err)
 	require.Equal(t, numDocs, int64(len(res.InsertedIDs)))
-	ms.InitBulkWriteChan(ctx)
+	ms.initSync(ctx)
 	lastSyncId, err := getLastSyncId(ctx, ms.Sender)
 	require.NoError(t, err)
 	// run syncCollection to transfer coll from sender to receiver
 	err = ms.syncCollection(ctx, "test", 97, lastSyncId)
 	require.NoError(t, err)
-	// there is no oplog, idle must be set manually
-	ms.setIdleState(true)
+	log.Debug("WaitIdle")
 	// wait until data transferred through BulkWrite channel
-	ms.WaitIdle(time.Millisecond)
+	ms.WaitIdle(time.Second)
 	// now check what we have received at the receiver
 	count, err := ms.Receiver.Collection(collName).CountDocuments(ctx, bson.M{"_id": bson.M{"$in": res.InsertedIDs}})
 	require.NoError(t, err)
@@ -78,10 +75,9 @@ func TestSyncCollection(t *testing.T) {
 // 3. insert another 100000 records
 // 4. sync to the receiver. This time it should be 100000 records copied, not 200000
 func TestSyncCollectionMultiple(t *testing.T) {
-	config.SetLogger()
+	config.SetLogger(log.InfoLevel)
 	ctx, cancel := context.WithCancel(context.TODO())
-	var waitSync sync.WaitGroup
-	ms, err := NewMongoSync(ctx, ExchCfg, &waitSync)
+	ms, err := NewMongoSync(ctx, ExchCfg)
 	require.NoError(t, err)
 	require.NotNil(t, ms)
 	require.NoError(t, err)
@@ -95,9 +91,7 @@ func TestSyncCollectionMultiple(t *testing.T) {
 	err = receiverColl.Drop(ctx)
 	require.NoError(t, err)
 
-	// there is no oplog, idle must be set manually
-	ms.setIdleState(true)
-	ms.InitBulkWriteChan(ctx)
+	ms.initSync(ctx)
 	for i := int64(0); i <= 3; i++ {
 		// insert another 1000
 		res, err := coll.InsertMany(ctx, CreateDocs(numDocs*i+1, numDocs))
@@ -108,7 +102,7 @@ func TestSyncCollectionMultiple(t *testing.T) {
 		err = ms.syncCollection(ctx, "test", 217, lastSyncId)
 		require.NoError(t, err)
 		// wait until data transferred through BulkWrite channel
-		ms.WaitIdle(time.Millisecond * 50)
+		ms.WaitIdle(time.Second)
 		// check all records inserted
 		c, err := receiverColl.CountDocuments(ctx, bson.D{})
 		require.NoError(t, err)
@@ -117,5 +111,5 @@ func TestSyncCollectionMultiple(t *testing.T) {
 
 	cancel()
 	log.Info("waitSync.Wait()")
-	waitSync.Wait()
+	ms.routines.Wait()
 }

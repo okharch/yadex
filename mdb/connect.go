@@ -11,6 +11,7 @@ import (
 // unless channel returned true there is no possibility to work with the connection
 func ConnectMongo(ctx context.Context, uri string) (client *mongo.Client, available chan bool, err error) {
 	available = make(chan bool, 1)
+	showStatus := false
 	svrMonitor := &event.ServerMonitor{
 		TopologyDescriptionChanged: func(changedEvent *event.TopologyDescriptionChangedEvent) {
 			servers := changedEvent.NewDescription.Servers
@@ -20,11 +21,13 @@ func ConnectMongo(ctx context.Context, uri string) (client *mongo.Client, availa
 					avail = true
 				}
 			}
-			var availStr string
-			if !avail {
-				availStr = " not"
+			if showStatus {
+				if !avail {
+					log.Warnf("server %s is down", uri)
+				} else {
+					log.Infof("server %s is up", uri)
+				}
 			}
-			log.Infof("server %s is%s available", uri, availStr)
 			available <- avail
 		},
 	}
@@ -41,5 +44,6 @@ func ConnectMongo(ctx context.Context, uri string) (client *mongo.Client, availa
 		}
 	}
 
+	showStatus = true
 	return client, available, ctx.Err()
 }

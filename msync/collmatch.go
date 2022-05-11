@@ -7,18 +7,20 @@ import (
 	"yadex/config"
 )
 
-type DataSyncCompiled struct {
-	Delay, Batch int
-	Exclude      []*regexp.Regexp
-}
-type collMatchEntry struct {
-	Delay, Batch int
-	rt           bool
-}
-type collMatch []struct {
-	re *regexp.Regexp
-	ds DataSyncCompiled
-}
+type (
+	DataSyncCompiled struct {
+		config  *config.DataSync
+		exclude []*regexp.Regexp
+	}
+	collMatchEntry struct {
+		config *config.DataSync
+		rt     bool
+	}
+	collMatch []struct {
+		re *regexp.Regexp
+		ds DataSyncCompiled
+	}
+)
 
 // compileRegexps compiles regexps from config into array of patterns
 // to match collection Name for DataSync configuration, that is MaxDelay and MaxBatch
@@ -47,7 +49,7 @@ func compileRegexps(m map[string]*config.DataSync) collMatch {
 			j++
 		}
 		exclude = exclude[:j]
-		result[i].ds = DataSyncCompiled{Delay: val.Delay, Batch: val.Batch, Exclude: exclude[:j]}
+		result[i].ds = DataSyncCompiled{config: val, exclude: exclude[:j]}
 		i++
 	}
 	return result[:i]
@@ -56,22 +58,22 @@ func compileRegexps(m map[string]*config.DataSync) collMatch {
 // findEntry iterates over collMatch to match collName against collMatch[i].RegExp
 // it returns -1,-1 if the match has not been found
 // otherwsie it returns (Max)Delay and (Max)Batch for the collection
-func findEntry(cms collMatch, collName []byte) (delay, batch int) {
+func findEntry(cms collMatch, collName []byte) *config.DataSync {
 nextMatch:
 	for _, cm := range cms {
 		if cm.re.Match(collName) {
-			for _, exclude := range cm.ds.Exclude {
+			for _, exclude := range cm.ds.exclude {
 				if exclude.Match(collName) {
 					continue nextMatch
 				}
 			}
-			return cm.ds.Delay, cm.ds.Batch
+			return cm.ds.config
 		}
 	}
-	return -1, -1
+	return nil
 }
 
-type CollMatch func(coll string) (Delay, Batch int, realtime bool)
+type CollMatch func(coll string) (config *config.DataSync, realtime bool)
 
 // GetCollMatch returns CollMatch func which returns Delay, Batch, realtime params for the collection
 // it's behaviour is defined by configuration
@@ -82,27 +84,27 @@ func GetCollMatch(c *config.ExchangeConfig) CollMatch {
 	st := compileRegexps(c.ST)
 	collEntry := make(map[string]collMatchEntry)
 	var collEntryMutex sync.RWMutex
-	return func(coll string) (Delay, Batch int, realtime bool) {
+	return func(coll string) (config *config.DataSync, realtime bool) {
 		// try cache first
 		collEntryMutex.RLock()
 		ce, ok := collEntry[coll]
 		collEntryMutex.RUnlock()
 		if ok {
-			return ce.Delay, ce.Batch, ce.rt
+			return ce.config, ce.rt
 		}
 		// look for RT
 		cm := []byte(coll)
-		Delay, Batch = findEntry(rt, cm)
-		if Delay != -1 {
+		config = findEntry(rt, cm)
+		if config != nil {
 			realtime = true
 		} else {
 			// look for ST
-			Delay, Batch = findEntry(st, cm)
+			config = findEntry(st, cm)
 		}
 		// cache the request, so next time it will be faster
 		collEntryMutex.Lock()
-		collEntry[coll] = collMatchEntry{Delay: Delay, Batch: Batch, rt: realtime}
+		collEntry[coll] = collMatchEntry{config: config, rt: realtime}
 		collEntryMutex.Unlock()
-		return Delay, Batch, realtime
+		return config, realtime
 	}
 }

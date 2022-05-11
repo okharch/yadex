@@ -2,109 +2,108 @@ package mongosync
 
 import (
 	log "github.com/sirupsen/logrus"
-	"go.mongodb.org/mongo-driver/bson"
 	"time"
 )
+
+const idleTimeout = time.Millisecond * 50
 
 // checkIdle facility created in order to detect situation
 // when there is no incoming records
 // and all the pending buffers with updates have been flushed.
 
-// initIdle creates channels collUpdates and idleChan used to implement checkIdle facility
-func (ms *MongoSync) initIdle() {
-	// this channel is used for non-blocking communication info about pending buffers in collection's channels
-	ms.collUpdateTotal = make(map[string]int)
-	ms.collSize = make(map[string]int)
-	ms.idleChan = make(chan bool, 1)
-	ms.routines.Add(1)
-	go ms.idle()
+func (ms *MongoSync) getPendingBulkWrite() int {
+	ms.bulkWriteMutex.RLock()
+	defer ms.bulkWriteMutex.RUnlock()
+	return ms.pendingBulkWrite
 }
 
-func (ms *MongoSync) setIdleState(idleState bool) {
-	ms.idleMutex.Lock()
-	ms.idleState = idleState
-	log.Tracef("idleState : %v", ms.idleState)
-	ms.idleMutex.Unlock()
-}
-
-func (ms *MongoSync) getIdleState() bool {
-	ms.idleMutex.RLock()
-	defer ms.idleMutex.RUnlock()
-	return ms.idleState
-}
-
-func (ms *MongoSync) getCollsBulkWriteTotal() int {
-	ms.collBulkWriteMutex.RLock()
-	defer ms.collBulkWriteMutex.RUnlock()
-	return ms.collsBulkWriteTotal
-}
-
-func (ms *MongoSync) addCollsBulkWriteTotal(delta int) {
-	ms.collBulkWriteMutex.Lock()
-	defer ms.collBulkWriteMutex.Unlock()
-	ms.collsBulkWriteTotal += delta
-	log.Tracef("CollsBulkWriteTotal : %d", ms.collsBulkWriteTotal)
-}
-
-// idle follows idleChan and maintains idleState variable
-// if it detects idle state and there is pending buffer for receiver it flushes that which is of max size
-func (ms *MongoSync) idle() {
-	defer ms.routines.Done()
-	for idleState := range ms.idleChan {
-		ms.setIdleState(idleState)
-		for ms.getIdleState() && ms.getCollsUpdateTotal() > 0 {
-			ms.flushUpdates()
-		}
+func (ms *MongoSync) addBulkWrite(delta int) {
+	ms.bulkWriteMutex.Lock()
+	ms.pendingBulkWrite += delta
+	ms.bulkWriteMutex.Unlock()
+	log.Tracef("addBulkWrite bw:%d upd:%d idle:%v", ms.pendingBulkWrite, ms.getPendingBuffers(), ms.getOplogIdle())
+	if ms.pendingBulkWrite == 0 && ms.getPendingBuffers() == 0 && ms.getOplogIdle() { // no need to check ms.getOplogIdle() ???
+		Signal(ms.idle) // after flushed BulkWrite, most immediate Idle signal
 	}
 }
 
-// flushUpdates finds out collection with maximal size of BulkWrite and flush it to BulkWrite channel
-func (ms *MongoSync) flushUpdates() {
-	ms.collUpdateMutex.RLock()
-	maxTotal := 0
-	var maxColl string
-	for coll, total := range ms.collUpdateTotal {
-		if total > maxTotal {
-			maxColl = coll
-			maxTotal = total
-		}
-	}
-	var collChan chan<- bson.Raw
-	if maxTotal != 0 {
-		log.Debugf("flushing coll %s %d bytes", maxColl, maxTotal)
-		collChan = ms.collChan[maxColl]
-		collChan <- nil // flush
-	}
-	ms.collUpdateMutex.RUnlock()
+func (ms *MongoSync) getBulkWriteTotal() int {
+	ms.bulkWriteMutex.RLock()
+	defer ms.bulkWriteMutex.RUnlock()
+	return ms.pendingBulkWrite
 }
 
 // updates size of  pending  coll's BulkWrite buffer
 func (ms *MongoSync) setCollUpdateTotal(coll string, total int) {
-	ms.collUpdateMutex.Lock()
-	defer ms.collUpdateMutex.Unlock()
-	oldTotal := ms.collUpdateTotal[coll]
+	ms.collBuffersMutex.Lock()
+	defer ms.collBuffersMutex.Unlock()
+	oldTotal := ms.collBuffers[coll]
 	if total == 0 {
-		delete(ms.collUpdateTotal, coll)
+		delete(ms.collBuffers, coll)
 	} else {
-		ms.collUpdateTotal[coll] = total
+		ms.collBuffers[coll] = total
 	}
-	ms.collsUpdateTotal += total - oldTotal
-	log.Tracef("collsUpdateTotal : %v", ms.collsUpdateTotal)
+	ms.pendingBuffers += total - oldTotal
+	log.Tracef("setCollUpdateTotal:pendingBuffers : %v", ms.pendingBuffers)
 }
 
-// WaitIdle detects situation when there is no pending input/output
+// getPendingBuffers returns total of bulkwrite buffers pending at coll's channels
+func (ms *MongoSync) getPendingBuffers() int {
+	ms.collBuffersMutex.RLock()
+	defer ms.collBuffersMutex.RUnlock()
+	return ms.pendingBuffers
+}
+
+// WaitIdle wait predefined period and then waits until all input/output/updated channels cleared
 func (ms *MongoSync) WaitIdle(timeout time.Duration) {
+	log.Infof("WaitIdle :timeout %v", timeout)
 	for {
-		time.Sleep(timeout)
-		if ms.getIdleState() && ms.getCollsUpdateTotal() == 0 && ms.getCollsBulkWriteTotal() == 0 {
+		select {
+		case <-ms.idle:
+			log.Tracef("WaitIdle:leaving on idle")
 			return
+		case <-time.After(timeout):
+			log.Tracef("WaitIdle:checking idle %v buf %d bw %d", ms.getOplogIdle(), ms.getPendingBuffers(), ms.getPendingBulkWrite())
+			if ms.getOplogIdle() && ms.getPendingBuffers() == 0 && ms.getPendingBulkWrite() == 0 {
+				log.Tracef("WaitIdle:found done, leaving")
+				return
+			}
 		}
 	}
 }
 
-// getCollsUpdateTotal returns total of bulkwrite buffers pending at coll's channels
-func (ms *MongoSync) getCollsUpdateTotal() int {
-	ms.collUpdateMutex.RLock()
-	defer ms.collUpdateMutex.RUnlock()
-	return ms.collsUpdateTotal
+func (ms *MongoSync) getOplogIdle() bool {
+	ms.oplogMutex.RLock()
+	defer ms.oplogMutex.RUnlock()
+	return ms.oplogIdle
+}
+
+func (ms *MongoSync) setOplogIdle(val bool) {
+	if !val && !ms.getOplogIdle() {
+		return
+	}
+	ms.oplogMutex.Lock()
+	ms.oplogIdle = val
+	ms.oplogMutex.Unlock()
+	if val && ms.getPendingBulkWrite() == 0 {
+		if ms.getPendingBuffers() == 0 {
+			Signal(ms.idle)
+			log.Tracef("setOplogIdle %v. Sent IDLE signal", val)
+		} else {
+			Signal(ms.flushUpdates)
+			log.Tracef("setOplogIdle %v. Sent FLUSH signal", val)
+		}
+	} else {
+		log.Tracef("setOplogIdle %v buf %d bw %d. No signals", val, ms.getPendingBuffers(), ms.getPendingBulkWrite())
+	}
+
+}
+
+// Signal sends signal to channel non-blocking way
+func Signal(ch chan struct{}) {
+	// nb (non-blocking) empty buffered channel
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
 }

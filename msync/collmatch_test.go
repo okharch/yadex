@@ -9,33 +9,36 @@ import (
 func TestGetCollMatch(t *testing.T) {
 	c := &config.ExchangeConfig{
 		RT: map[string]*config.DataSync{"realtime": {
-			Delay:   100,
-			Batch:   500,
+			Delay:   99,
+			Batch:   512,
 			Exclude: []string{"not-really"},
 		},
 		},
 		ST: map[string]*config.DataSync{".*": {
-			Delay:   100,
-			Batch:   500,
+			Delay:   500,
+			Batch:   8192,
 			Exclude: []string{"realtime"},
 		},
 		},
 	}
 	cm := GetCollMatch(c)
 	require.NotNil(t, cm)
-	delay, batch, rt := cm("test")
+	cfg, rt := cm("test")
+	require.NotNil(t, cfg)
 	require.False(t, rt)
-	require.Equal(t, 100, delay)
-	require.Equal(t, 500, batch)
+	require.Equal(t, config.STMinDelayDefault, cfg.MinDelay)
+	require.Equal(t, 500, cfg.Delay)
+	require.Equal(t, 8192, cfg.Batch)
 	// check again it returns the same value
-	delay1, batch1, rt1 := cm("test")
-	require.Equal(t, delay, delay1)
-	require.Equal(t, batch, batch1)
+	cfg1, rt1 := cm("test")
+	require.NotNil(t, cfg1)
+	require.Equal(t, cfg, cfg1)
 	require.Equal(t, rt, rt1)
-	delay, batch, rt = cm("a1-realtime")
+	cfg, rt = cm("a1-realtime")
+	require.NotNil(t, cfg)
 	require.True(t, rt)
-	require.Equal(t, 100, delay)
-	require.Equal(t, 500, batch)
-	delay, batch, rt = cm("not-really-realtime")
-	require.Equal(t, -1, delay)
+	require.Equal(t, 99, cfg.Delay)
+	require.Equal(t, 512, cfg.Batch)
+	cfg, rt = cm("not-really-realtime")
+	require.Nil(t, cfg)
 }

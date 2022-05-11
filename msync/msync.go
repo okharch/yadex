@@ -6,6 +6,8 @@ import (
 	log "github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
+	"regexp"
+	"strings"
 	"sync"
 	"yadex/config"
 	"yadex/mdb"
@@ -40,56 +42,62 @@ type MongoSync struct {
 	Sender, Receiver  *mongo.Database
 	senderClient      *mongo.Client
 	receiverClient    *mongo.Client
-	senderAvailable   chan bool
-	receiverAvailable chan bool
+	senderAvailable   chan bool         // this channel follows availability of the sender server
+	receiverAvailable chan bool         // this channel follows availability of the receiver server
 	bwRT, bwST        chan *BulkWriteOp // channels for RT and ST BulkWrites
-	bwPut             chan struct{}     // triggered when there is pending RT or ST bulkWrite in above bwRT/bwST channels
 	Config            *config.ExchangeConfig
 	collSyncId        map[string]string
 	routines          sync.WaitGroup // housekeeping of runSync. it is zero on exit
 	CollSyncId        *mongo.Collection
 	oplog             Oplog
 	collMatch         CollMatch
-	// housekeeping of active exchanges. As soon as there is some problem with connection, etc. it becomes zero
-	waitExchanges *sync.WaitGroup
+	collChan          map[string]chan<- bson.Raw // any collection has it's dedicated channel with dedicated goroutine.
 	// checkIdle facility, see checkIdle.go
-	collUpdateMutex     sync.RWMutex
-	collUpdateTotal     map[string]int
-	collsUpdateTotal    int //
-	collBulkWriteMutex  sync.RWMutex
-	collsBulkWriteTotal int                        // total of bulkWrite buffers queued at bwRT and bwST channels
-	idleChan            chan bool                  // true if it waits for oplog, false in between
-	collChan            map[string]chan<- bson.Raw // any collection has it's dedicated channel with dedicated goroutine.
-	collSize            map[string]int             //
-	collMax             string
-	collMaxCount        int
-	idleMutex           sync.RWMutex
-	idleState           bool
+	wgRT             sync.WaitGroup // this is used to prevent ST BulkWrites clash over RT ones
+	oplogIdle        bool
+	oplogMutex       sync.RWMutex
+	collBuffers      map[string]int
+	pendingBuffers   int // pending bytes in collection's buffers
+	collBuffersMutex sync.RWMutex
+	pendingBulkWrite int // total of bulkWrite buffers queued at bwRT and bwST channels
+	bulkWriteMutex   sync.RWMutex
+	// flushUpdates is for FLUSH signal when oplog idling
+	flushUpdates chan struct{}
+	// idle is triggered from flushUpdates when there is nothing left unsent to the server
+	idle chan struct{}
 }
 
 var allRecords = bson.D{} // used for filter parameter where there is no need to filter
 
+// CollSyncIdDbName is the name of database where we store collections for different exchanges (one collection per exchange)
+// collection stores last sync_id for each individual collection being synced - so it can resume sync from that point
+const CollSyncIdDbName = "mongoSync"
+
 // NewMongoSync returns
-func NewMongoSync(ctx context.Context, exchCfg *config.ExchangeConfig, waitExchanges *sync.WaitGroup) (*MongoSync, error) {
-	r := &MongoSync{Config: exchCfg, waitExchanges: waitExchanges}
-	r.Config = exchCfg
-	log.Infof("Establishing exchange %s...", r.Name())
+func NewMongoSync(ctx context.Context, exchCfg *config.ExchangeConfig) (*MongoSync, error) {
+	ms := &MongoSync{Config: exchCfg}
+	ms.Config = exchCfg
+	log.Infof("Establishing exchange %s...", ms.Name())
 	var err error
-	r.senderClient, r.senderAvailable, err = mdb.ConnectMongo(ctx, r.Config.SenderURI)
+	ms.senderClient, ms.senderAvailable, err = mdb.ConnectMongo(ctx, ms.Config.SenderURI)
 	if err != nil {
 		return nil, fmt.Errorf("failed to establish client for sender: %w", err)
 	}
-	log.Infof("Sucessfully connected to sender's DB at %s", r.Config.SenderURI)
-	r.Sender = r.senderClient.Database(r.Config.SenderDB)
-	r.receiverClient, r.receiverAvailable, err = mdb.ConnectMongo(ctx, r.Config.ReceiverURI)
+	log.Infof("Sucessfully connected to sender's DB at %s", ms.Config.SenderURI)
+	ms.Sender = ms.senderClient.Database(ms.Config.SenderDB)
+	ms.receiverClient, ms.receiverAvailable, err = mdb.ConnectMongo(ctx, ms.Config.ReceiverURI)
 	if err != nil {
 		return nil, fmt.Errorf("failed to establish client for receiver: %w", err)
 	}
-	r.Receiver = r.receiverClient.Database(r.Config.ReceiverDB)
-	log.Infof("Sucessfully connected to receiver's DB at %s", r.Config.ReceiverURI)
-	r.collMatch = GetCollMatch(r.Config) //
-	r.initIdle()
-	return r, nil
+	ms.Receiver = ms.receiverClient.Database(ms.Config.ReceiverDB)
+	log.Infof("Sucessfully connected to receiver's DB at %s", ms.Config.ReceiverURI)
+	ms.collMatch = GetCollMatch(ms.Config) //
+	bookmarkColSyncIdName := strings.Join([]string{ms.Config.SenderURI, ms.Config.SenderDB, ms.Config.ReceiverURI, ms.Config.ReceiverDB},
+		"-")
+	reNotId := regexp.MustCompile("[^a-zA-Z0-9]+")
+	bookmarkColSyncIdName = reNotId.ReplaceAllLiteralString(bookmarkColSyncIdName, "-")
+	ms.CollSyncId = ms.senderClient.Database(CollSyncIdDbName).Collection(bookmarkColSyncIdName)
+	return ms, nil
 }
 
 // Run launches synchronization between sender and receiver for established MongoSync object.
@@ -113,17 +121,15 @@ func (ms *MongoSync) Run(ctx context.Context) {
 			if !receiverAvail {
 				rAvail = " not"
 			}
-			log.Infof("sender:%s available, receiver:%s available", sAvail, rAvail)
+			log.Debugf("sender:%s available, receiver:%s available", sAvail, rAvail)
 			if exAvail {
-				ms.waitExchanges.Add(1)
 				ms.routines.Add(1)
 				log.Infof("Connection available, start syncing of %s again...", ms.Name())
 				go ms.runSync(exCtx)
 			} else {
-				log.Infof("Exchange unavailable, stopping %s... ", ms.Name())
+				log.Warnf("Exchange unavailable, stopping %s... ", ms.Name())
 				exCancel()
 				ms.routines.Wait()
-				ms.waitExchanges.Done()
 				exCtx, exCancel = context.WithCancel(ctx)
 			}
 			oldAvail = exAvail
@@ -148,9 +154,8 @@ func (ms *MongoSync) Run(ctx context.Context) {
 // it creates all the channels and trying to resume from the safe point
 func (ms *MongoSync) runSync(ctx context.Context) {
 	// create func to put BulkWriteOp into channel. It deals appropriate both with RT and ST
-	defer ms.waitExchanges.Done()
 	defer ms.routines.Done()
-	ms.InitBulkWriteChan(ctx)
+	ms.initSync(ctx)
 	err := ms.resumeOplog(ctx)
 	if ctx.Err() != nil {
 		return // gracefully handle sync.Stop
@@ -165,7 +170,7 @@ func (ms *MongoSync) runSync(ctx context.Context) {
 		return
 	}
 	// start handling oplog for syncing sender and receiver collections
-	ms.processOpLog()
+	ms.processOpLog(ctx)
 }
 
 func (ms *MongoSync) Name() string {

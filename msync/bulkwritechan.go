@@ -7,65 +7,63 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"regexp"
-	"strings"
 	"time"
 )
 
-// CollSyncIdDbName is the name of database where we store collections for different exchanges (one collection per exchange)
-// collection stores last sync_id for each individual collection being synced - so it can resume sync from that point
-const CollSyncIdDbName = "mongoSync"
-
-// InitBulkWriteChan creates bwRT and bwST chan *BulkWriteOp  used to add bulkWrite operation to buffered channel
+// initSync creates bwRT and bwST chan *BulkWriteOp  used to add bulkWrite operation to buffered channel
 // also it initializes collection CollSyncId to update sync progress
 // bwPut channel is used for signalling there is pending BulkWrite op
 // it launches serveBWChan goroutine which serves  operation from those channel and
-func (ms *MongoSync) InitBulkWriteChan(ctx context.Context) {
+func (ms *MongoSync) initSync(ctx context.Context) {
+	ms.collBuffers = make(map[string]int)
 	// get name of bookmarkColSyncid on sender
-	bookmarkColSyncIdName := strings.Join([]string{ms.Config.SenderURI, ms.Config.SenderDB, ms.Config.ReceiverURI, ms.Config.ReceiverDB},
-		"-")
-	reNotId := regexp.MustCompile("[^a-zA-Z0-9]+")
-	bookmarkColSyncIdName = reNotId.ReplaceAllLiteralString(bookmarkColSyncIdName, "-")
-	ms.CollSyncId = ms.senderClient.Database(CollSyncIdDbName).Collection(bookmarkColSyncIdName)
+	log.Tracef("initSync")
 	// create buffered (3) BulkWrite channel
 	ms.bwRT = make(chan *BulkWriteOp, 3)
-	ms.bwST = make(chan *BulkWriteOp, 1)
-	ms.bwPut = make(chan struct{}, 3)
+	ms.bwST = make(chan *BulkWriteOp)
+	// signalling channels
+	ms.idle = make(chan struct{})
+	ms.flushUpdates = make(chan struct{})
+
+	ms.routines.Add(5)
+	// close channels on expired context
+	go func() {
+		defer ms.routines.Done()
+		<-ctx.Done()
+		close(ms.bwST)
+		close(ms.bwRT)
+		close(ms.idle)
+		close(ms.flushUpdates)
+	}()
 
 	// runSync few parallel serveBWChan() goroutines
-	for i := 0; i < 2; i++ {
-		ms.routines.Add(1)
-		go ms.serveBWChan(ctx)
+	// 2 RT servers
+	go ms.serveRTChan(ctx)
+	go ms.serveRTChan(ctx)
+	// 1 ST
+	go ms.serveSTChan(ctx)
+	// flushUpdates server
+	go ms.serveFlushUpdates(ctx)
+}
+
+func (ms *MongoSync) serveRTChan(ctx context.Context) {
+	defer ms.routines.Done()
+	log.Trace("serveRTChan")
+	for bwOp := range ms.bwRT {
+		ms.wgRT.Add(1)
+		ms.BulkWriteOp(ctx, bwOp)
+		ms.wgRT.Done()
 	}
 }
 
-// serveBWChan watches for any incoming BulkWrite operation
-// then it first checks bwRT channel, if it is empty
-// it gets BW op from bwST channel
-// it uses BulkWriteOp method to send that BWOp to the receiver
-func (ms *MongoSync) serveBWChan(ctx context.Context) {
+// serveSTChan serves bwST channel, waits outputClear state before call ms.BulkWriteOp(ctx, bwOp)
+func (ms *MongoSync) serveSTChan(ctx context.Context) {
 	defer ms.routines.Done()
-	for {
-		// blocking wait any BulkWrite put to either channel
-		select {
-		case <-ctx.Done():
-			return
-		case <-ms.bwPut:
-		}
-		// either RT or ST pending
-		// non-blocking check RT
-		select {
-		case bwOp := <-ms.bwRT:
-			ms.BulkWriteOp(ctx, bwOp)
-			continue
-		default:
-		}
-		// non-blocking check ST
-		select {
-		case bwOp := <-ms.bwST:
-			ms.BulkWriteOp(ctx, bwOp)
-		default:
-		}
+	log.Trace("serveSTChan")
+	for bwOp := range ms.bwST {
+		log.Tracef("serveSTChan:wgRT.Wait() %s %d", bwOp.Coll, bwOp.TotalBytes)
+		ms.wgRT.Wait()
+		ms.BulkWriteOp(ctx, bwOp)
 	}
 }
 
@@ -73,18 +71,24 @@ func (ms *MongoSync) serveBWChan(ctx context.Context) {
 // Also, it puts signal to bwPut channel to inform serveBWChan
 // there is a pending event in either of two channels.
 func (ms *MongoSync) putBwOp(bwOp *BulkWriteOp) {
-	//log.Debugf("putBwOp: %s %v %d", bwOp.Coll,bwOp.OpType, len(bwOp.Models))
+	log.Tracef("putBwOp: %s %v %d", bwOp.Coll, bwOp.OpType, len(bwOp.Models))
+	ms.addBulkWrite(bwOp.TotalBytes)
 	if bwOp.RealTime {
+		log.Tracef("putBwOp put RT %s %d(%d) records", bwOp.Coll, len(bwOp.Models), bwOp.TotalBytes)
 		ms.bwRT <- bwOp
 	} else {
+		log.Tracef("putBwOp put ST %s %d(%d) records", bwOp.Coll, len(bwOp.Models), bwOp.TotalBytes)
 		ms.bwST <- bwOp
 	}
-	ms.addCollsBulkWriteTotal(bwOp.TotalBytes)
-	ms.bwPut <- struct{}{}
 }
 
 // BulkWriteOp BulkWrite bwOp.Models to sender, updates SyncId for the bwOp.Coll
 func (ms *MongoSync) BulkWriteOp(ctx context.Context, bwOp *BulkWriteOp) {
+	if ctx.Err() != nil {
+		return
+	}
+	defer ms.addBulkWrite(-bwOp.TotalBytes)
+	log.Tracef("BulkWriteOp %s %d", bwOp.Coll, bwOp.TotalBytes)
 	collAtReceiver := ms.Receiver.Collection(bwOp.Coll)
 	if bwOp.OpType == OpLogDrop {
 		log.Tracef("drop Receiver.%s", bwOp.Coll)
@@ -95,8 +99,8 @@ func (ms *MongoSync) BulkWriteOp(ctx context.Context, bwOp *BulkWriteOp) {
 	}
 	ordered := bwOp.OpType == OpLogOrdered
 	optOrdered := &options.BulkWriteOptions{Ordered: &ordered}
+	log.Tracef("BulkWriteOp %s %d records ", bwOp.Coll, len(bwOp.Models))
 	r, err := collAtReceiver.BulkWrite(ctx, bwOp.Models, optOrdered)
-	ms.addCollsBulkWriteTotal(-bwOp.TotalBytes)
 	if err != nil {
 		// here we do not consider "DuplicateKey" as an error.
 		// If the record with DuplicateKey is already on the receiver - it is fine

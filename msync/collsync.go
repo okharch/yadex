@@ -41,6 +41,7 @@ func (ms *MongoSync) syncCollection(ctx context.Context, collName string, maxBul
 		if count == 0 {
 			return
 		}
+		log.Tracef("syncCollection flushing %d records", len(models))
 		ms.putBwOp(&BulkWriteOp{
 			Coll:   collName,
 			OpType: OpLogUnordered,
@@ -92,8 +93,8 @@ func (ms *MongoSync) SyncCollections(ctx context.Context) error {
 		return err
 	}
 	for _, coll := range colls {
-		delay, batch, rt := ms.collMatch(coll)
-		if delay == -1 || rt {
+		config, rt := ms.collMatch(coll)
+		if config == nil || rt {
 			continue
 		}
 		// we copy only ST collections which do not have a bookmark in collSyncStartFrom
@@ -102,7 +103,7 @@ func (ms *MongoSync) SyncCollections(ctx context.Context) error {
 			if err != nil {
 				return fmt.Errorf("Can't fetch SyncId to start replication after collection %s clone: %w", coll, err)
 			}
-			if err := ms.syncCollection(ctx, coll, batch, lastSyncId); err != nil {
+			if err := ms.syncCollection(ctx, coll, config.Batch, lastSyncId); err != nil {
 				return fmt.Errorf("failed to clone collection %s to receiver: %w", coll, err)
 			}
 			ms.collSyncId[coll] = lastSyncId

@@ -12,7 +12,7 @@ import (
 )
 
 func TestMakeWatchConfigChannel(t *testing.T) {
-	SetLogger()
+	SetLogger(log.TraceLevel)
 	c := &Config{
 		Exchanges: []*ExchangeConfig{
 			{
@@ -20,16 +20,12 @@ func TestMakeWatchConfigChannel(t *testing.T) {
 				SenderDB:    "IonM",
 				ReceiverURI: "mongodb://localhost:27023",
 				ReceiverDB:  "IonM",
-				RT: map[string]*DataSync{"realtime": {
-					Delay:   100,
-					Batch:   100,
-					Exclude: nil,
-				},
-				},
+				RT:          map[string]*DataSync{"realtime": {}},
 				ST: map[string]*DataSync{".*": {
-					Delay:   1000,
-					Batch:   500,
-					Exclude: []string{"realtime"},
+					MinDelay: 1100,
+					Delay:    1000,
+					Batch:    500,
+					Exclude:  []string{"realtime"},
 				},
 				},
 			},
@@ -48,11 +44,24 @@ func TestMakeWatchConfigChannel(t *testing.T) {
 	// first available after watching
 	c1 := <-cfgChan
 	require.NotEqual(t, c, c1)
-	require.Equal(t, 1, len(c1.Exchanges))
+	require.Equal(t, len(c.Exchanges), len(c1.Exchanges))
 	x := c.Exchanges[0]
 	x1 := c1.Exchanges[0]
 	require.Equal(t, x.ReceiverURI, x1.ReceiverURI)
 	require.Equal(t, x.SenderURI, x1.SenderURI)
+
+	// make sure it set default values for omitted fields in config
+	require.Equal(t, 0, x.RT["realtime"].MinDelay)
+	require.Equal(t, RTMinDelayDefault, x1.RT["realtime"].MinDelay)
+	require.Equal(t, 0, x.RT["realtime"].Delay)
+	require.Equal(t, RTDelayDefault, x1.RT["realtime"].Delay)
+	require.Equal(t, 0, x.RT["realtime"].Batch)
+	require.Equal(t, RTBatchDefault, x1.RT["realtime"].Batch)
+
+	// make sure it fixes error minDelay>MaxDelay
+	require.Greater(t, x.ST[".*"].MinDelay, x.ST[".*"].Delay)
+	require.GreaterOrEqual(t, x1.ST[".*"].Delay, x1.ST[".*"].MinDelay)
+
 	// now nothing available for 1 second
 	var timeout bool
 	waitConfig := func(Delay time.Duration) *Config {

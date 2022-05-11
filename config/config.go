@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"fmt"
 	"github.com/fsnotify/fsnotify"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
@@ -12,11 +13,22 @@ import (
 	"time"
 )
 
+const (
+	STMinDelayDefault = 999
+	RTMinDelayDefault = 99
+	RTDelayDefault    = 100
+	STDelayDefault    = 2000
+	RTBatchDefault    = 512  // if pending RT batch reaches this size it will be flushed
+	STBatchDefault    = 8192 // if pending ST batch reaches this size it will be flushed
+	DefaultDB         = "IonM"
+)
+
 type (
 	DataSync struct {
-		Delay   int      // max delay before flush
-		Batch   int      // max size before flush
-		Exclude []string // Regexp of colls to exclude
+		MinDelay int      // minimal ms delay before consequential flush of buffers
+		Delay    int      // max delay before flush
+		Batch    int      // max size before flush
+		Exclude  []string // Regexp of colls to exclude
 	}
 	ExchangeConfig struct {
 		SenderURI   string
@@ -31,6 +43,12 @@ type (
 	}
 )
 
+func setIntDefault(v *int, d int) {
+	if *v == 0 {
+		*v = d
+	}
+}
+
 func ReadConfig(configFile string) (*Config, error) {
 	data, err := os.ReadFile(configFile)
 	if err != nil {
@@ -42,6 +60,35 @@ func ReadConfig(configFile string) (*Config, error) {
 	err = yaml.Unmarshal(data, &result)
 	if err != nil {
 		return nil, errors.Wrapf(err, "Error parsing yaml config %s ", configFile)
+	}
+	// now check empty fields to set defaults
+	for i, e := range result.Exchanges {
+		if e.SenderDB == "" {
+			e.SenderDB = DefaultDB
+		}
+		if e.ReceiverDB == "" {
+			e.ReceiverDB = DefaultDB
+		}
+		// set RT defaults
+		for key, r := range e.RT {
+			setIntDefault(&r.MinDelay, RTMinDelayDefault)
+			setIntDefault(&r.Delay, RTDelayDefault)
+			if r.Delay < r.MinDelay {
+				log.Warnf("found [%d].RT.%s.Delay(%d) less than MinDelay(%d), set to MinDelay", i, key, r.Delay, r.MinDelay)
+				r.Delay = r.MinDelay
+			}
+			setIntDefault(&r.Batch, RTBatchDefault)
+		}
+		// set ST defaults
+		for key, r := range e.ST {
+			setIntDefault(&r.MinDelay, STMinDelayDefault)
+			setIntDefault(&r.Delay, STDelayDefault)
+			if r.Delay < r.MinDelay {
+				log.Warnf("found [%d].ST.%s.Delay(%d) less than MinDelay(%d), set to MinDelay", i, key, r.Delay, r.MinDelay)
+				r.Delay = r.MinDelay
+			}
+			setIntDefault(&r.Batch, STBatchDefault)
+		}
 	}
 	return &result, nil
 }
@@ -114,13 +161,30 @@ func MakeWatchConfigChannel(ctx context.Context, configFileName string) chan *Co
 	return configChan
 }
 
-func SetLogger() {
-	//log.SetFormatter(Formatter)
-	log.SetLevel(log.TraceLevel)
+func SetLogger(level log.Level) {
+	dir := os.Getenv("TEMP")
+	if dir == "" {
+		dir = "C:/Temp"
+	}
+	fileName := dir + "/" + "test.log"
+	log.Infof("logging to file %s", fileName)
+	//	os.Remove(fileName)
+	f, err := os.OpenFile(fileName, os.O_CREATE|os.O_TRUNC, 0666)
+	go func() {
+		for range time.Tick(time.Second) {
+			_ = f.Sync()
+		}
+	}()
+	log.SetOutput(f)
+	if err != nil {
+		fmt.Printf("error opening file: %v", err)
+	}
+	log.SetLevel(level)
 	log.SetReportCaller(true)
 	Formatter := new(log.TextFormatter)
-	Formatter.TimestampFormat = "2006-01-02T15:04:05.999999999Z07:00"
+	//Formatter.TimestampFormat = "2006-01-02T15:04:05.999999999Z07:00"
 	Formatter.TimestampFormat = "2006-01-02T15:04:05.999"
 	Formatter.FullTimestamp = true
-	Formatter.ForceColors = true
+	//Formatter.ForceColors = true
+	log.SetFormatter(Formatter)
 }

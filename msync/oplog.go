@@ -1,4 +1,5 @@
-package mongosync // getOpLog gets oplog and decodes it to bson.M. If it fails it returns nil
+package mongosync
+
 import (
 	"context"
 	"encoding/hex"
@@ -12,6 +13,7 @@ import (
 	"time"
 )
 
+// getOpLog gets oplog and decodes it to bson.M. If it fails it returns nil
 func getOpLog(ctx context.Context, changeStream *mongo.ChangeStream) (bson.M, error) {
 	var op bson.M
 	if changeStream.Next(ctx) && changeStream.Decode(&op) == nil {
@@ -25,7 +27,6 @@ func getOpLog(ctx context.Context, changeStream *mongo.ChangeStream) (bson.M, er
 func getChangeStream(ctx context.Context, sender *mongo.Database, syncId string) (changeStream *mongo.ChangeStream, err error) {
 	// add option so mongo provides FullDocument for update event
 	opts := options.ChangeStream().SetFullDocument(options.UpdateLookup)
-	opts.SetMaxAwaitTime(time.Millisecond * 50)
 	if syncId != "" {
 		resumeToken := &bson.M{"_data": syncId}
 		opts.SetResumeAfter(resumeToken)
@@ -40,32 +41,34 @@ func (ms *MongoSync) GetDbOpLog(ctx context.Context, db *mongo.Database, syncId 
 	if err != nil {
 		return nil, err
 	}
-	ch := make(chan bson.Raw)
+	ch := make(chan bson.Raw, 128)
+	// provide oplog entries to the channel, closes channel upon exit
 	go func() {
 		defer close(ch)
 		for {
-			// try nowait Next
-			success := changeStream.TryNext(ctx)
-			if !success {
-				// no pending ops, send idleState update
-				ms.idleChan <- true
-				success = changeStream.Next(ctx)
+			next := changeStream.TryNext(ctx)
+			if !next && ctx.Err() == nil {
+				log.Infof("GetDbOpLog: no pending oplog buf %d bw %d", ms.getPendingBuffers(), ms.getPendingBulkWrite())
+				ms.setOplogIdle(true)
+				next = changeStream.Next(ctx)
 			}
-			// set IdleState = false
-			ms.idleChan <- false
-			if success {
+			if next {
 				ch <- changeStream.Current
-			}
-			err = changeStream.Err()
-			if err == nil {
 				continue
 			}
+			err = ctx.Err()
 			if errors.Is(err, context.Canceled) {
 				log.Info("Process oplog gracefully shutdown")
-			} else {
+				return
+			} else if err != nil {
 				log.Errorf("shutdown oplog : can't get next oplog entry %s", err)
+				return
 			}
-			return
+			err := changeStream.Err()
+			if err != nil {
+				log.Errorf("failed to get oplog entry: %s", err)
+				continue
+			}
 		}
 	}()
 	return ch, nil
@@ -141,7 +144,7 @@ func (ms *MongoSync) resumeOplog(ctx context.Context) error {
 		if ms.oplog == nil {
 			ms.oplog, err = ms.GetDbOpLog(ctx, ms.Sender, b.SyncId)
 			if ms.oplog != nil {
-				log.Infof("sync was resumed from (%s) %s", b.CollName, b.SyncId)
+				log.Debugf("sync was resumed from (%s) %s", b.CollName, b.SyncId)
 			}
 		}
 		if ms.oplog != nil {
@@ -163,27 +166,31 @@ func (ms *MongoSync) resumeOplog(ctx context.Context) error {
 // it calls getCollChan func to create that channel.
 // Then it redirects oplog entry to that channel.
 // If SyncId for that oplog is equal or greater than syncId for the collection
-func (ms *MongoSync) processOpLog() {
+func (ms *MongoSync) processOpLog(ctx context.Context) {
 	// each collection has separate channel for receiving its events.
 	// that channel is served by dedicated goroutine
 	ms.collChan = make(map[string]chan<- bson.Raw, 128)
-	defer func() {
-		// close channels for oplog operations
-		for _, ch := range ms.collChan {
-			ch <- nil // flush them before closing
-			close(ch)
-		}
-	}()
-	ms.initIdle()
 	// loop until context tells we are done
-	for op := range ms.oplog {
+	for {
+		var op bson.Raw
+		select {
+		case <-ctx.Done():
+			return
+		case op = <-ms.oplog:
+		case <-time.After(idleTimeout):
+			log.Infof("processOpLog: idle true")
+			ms.setOplogIdle(true)
+			continue
+		}
 		// find out the name of the collection
 		// check if it is synced
 		coll := getColl(op)
-		delay, batch, rt := ms.collMatch(coll)
-		if delay == -1 {
+		config, rt := ms.collMatch(coll)
+		if config == nil {
 			continue // ignore sync for this collection
 		}
+		log.Tracef("oplog coll %s, size %d", coll, len(op))
+		ms.setOplogIdle(false)
 		// find out the channel for collection
 		if ch, ok := ms.collChan[coll]; ok {
 			// if a channel is there - the sync is underway, no need for other checks
@@ -200,9 +207,8 @@ func (ms *MongoSync) processOpLog() {
 			log.Debugf("start follow coll %s from %s", coll, syncId)
 		}
 		// now establish handling channel for that collection so the next op can be handled
-		ms.idleMutex.Lock()
-		ms.collChan[coll] = ms.getCollChan(coll, delay, batch, rt)
-		ms.idleMutex.Unlock()
+		ms.collChan[coll] = ms.getCollChan(ctx, coll, config, rt)
+		log.Tracef("coll %s chan", coll)
 		ms.collChan[coll] <- op
 	}
 }
