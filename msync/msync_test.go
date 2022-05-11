@@ -25,8 +25,8 @@ var c = &config.Config{
 			},
 			},
 			ST: map[string]*config.DataSync{".*": {
-				Delay:   99,
-				Batch:   8192, // bytes
+				Delay:   999,
+				Batch:   1024 * 128, // bytes
 				Exclude: []string{"realtime"},
 			},
 			},
@@ -51,7 +51,7 @@ func TestNewMongoSync(t *testing.T) {
 // 3. insert another N records
 // 4. sync to the receiver. This time it should be N records copied, not N*2
 func TestSync(t *testing.T) {
-	config.SetLogger(log.InfoLevel)
+	config.SetLogger(log.TraceLevel)
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
 	ms, err := NewMongoSync(ctx, ExchCfg)
@@ -63,6 +63,7 @@ func TestSync(t *testing.T) {
 	require.Nil(t, err)
 	const collName = "test"
 	// start syncing
+	started := time.Now()
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -76,28 +77,34 @@ func TestSync(t *testing.T) {
 	require.NoError(t, coll.Drop(ctx))
 	ir, err := coll.InsertOne(ctx, bson.D{{"name", "one"}})
 	const countMany = int64(10000)
-	const countLoop = int64(3)
+	const countLoop = int64(60)
 	var ids []interface{}
 	for i := int64(0); i < countLoop; i++ {
 		ir, err := coll.InsertMany(ctx, CreateDocs(i*countMany+1, countMany))
 		require.NoError(t, err)
 		ids = append(ids, ir.InsertedIDs...)
+		time.Sleep(time.Millisecond * 100)
 	}
 	require.NoError(t, err)
-	ms.WaitIdle(time.Second)
+	// remove 1 r before wait
+	ms.WaitIdle(time.Millisecond * 100)
+	// delete inserted first
 	filter := bson.M{"_id": ir.InsertedID}
-	c, err := receiverColl.CountDocuments(ctx, filter)
-	require.NoError(t, err)
-	require.Equal(t, int64(1), c)
 	dr, err := coll.DeleteOne(ctx, filter)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), dr.DeletedCount)
+	c, err := receiverColl.CountDocuments(ctx, filter)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), c)
 	//time.Sleep(time.Second/2)
-	ms.WaitIdle(time.Second)
+	ms.WaitIdle(time.Millisecond * 100)
 	c, err = receiverColl.CountDocuments(ctx, filter)
 	require.NoError(t, err)
 	require.Equal(t, int64(0), c)
 	c, err = receiverColl.CountDocuments(ctx, bson.M{"_id": bson.M{"$in": ids}})
 	require.NoError(t, err)
 	require.Equal(t, countMany*countLoop, c)
+	duration := time.Since(started)
+	log.Infof("Transferred %d bytes in %v, avg speed %s b/s", ms.totalBulkWrite, duration,
+		IntCommaB(ms.totalBulkWrite*int(time.Second)/int(duration)))
 }

@@ -14,8 +14,8 @@ var ExchCfg = &config.ExchangeConfig{
 	SenderURI: "mongodb://localhost:27021",
 	SenderDB:  "test",
 	ST: map[string]*config.DataSync{"test": {
-		Delay:   10,
-		Batch:   97,
+		Delay:   500,
+		Batch:   1024 * 256,
 		Exclude: nil,
 	},
 	},
@@ -56,7 +56,7 @@ func TestSyncCollection(t *testing.T) {
 	lastSyncId, err := getLastSyncId(ctx, ms.Sender)
 	require.NoError(t, err)
 	// run syncCollection to transfer coll from sender to receiver
-	err = ms.syncCollection(ctx, "test", 97, lastSyncId)
+	err = ms.syncCollection(ctx, "test", 1024*128, lastSyncId)
 	require.NoError(t, err)
 	log.Debug("WaitIdle")
 	// wait until data transferred through BulkWrite channel

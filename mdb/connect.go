@@ -5,12 +5,13 @@ import (
 	"go.mongodb.org/mongo-driver/event"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"time"
 )
 
 // ConnectMongo connections state is broadcast by available channel.
 // unless channel returned true there is no possibility to work with the connection
 func ConnectMongo(ctx context.Context, uri string) (client *mongo.Client, available chan bool, err error) {
-	available = make(chan bool, 1)
+	available = make(chan bool, 2)
 	showStatus := false
 	svrMonitor := &event.ServerMonitor{
 		TopologyDescriptionChanged: func(changedEvent *event.TopologyDescriptionChangedEvent) {
@@ -39,6 +40,8 @@ func ConnectMongo(ctx context.Context, uri string) (client *mongo.Client, availa
 	for !avail {
 		select {
 		case <-ctx.Done():
+			avail = true
+		case <-time.After(time.Second):
 			avail = true
 		case avail = <-available:
 		}

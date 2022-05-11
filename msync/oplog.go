@@ -42,15 +42,32 @@ func (ms *MongoSync) GetDbOpLog(ctx context.Context, db *mongo.Database, syncId 
 		return nil, err
 	}
 	ch := make(chan bson.Raw, 128)
+	idle := make(chan bool)
+	ms.routines.Add(1)
+	go func() {
+		defer ms.routines.Done()
+		for idle := range idle {
+			select {
+			case <-time.After(idleTimeout):
+				if idle {
+					ms.checkIdle("oplog idling, on tick")
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 	// provide oplog entries to the channel, closes channel upon exit
 	go func() {
 		defer close(ch)
+		defer close(idle)
 		for {
 			next := changeStream.TryNext(ctx)
 			if !next && ctx.Err() == nil {
 				log.Infof("GetDbOpLog: no pending oplog buf %d bw %d", ms.getPendingBuffers(), ms.getPendingBulkWrite())
-				ms.setOplogIdle(true)
+				idle <- true
 				next = changeStream.Next(ctx)
+				idle <- false
 			}
 			if next {
 				ch <- changeStream.Current
@@ -171,16 +188,9 @@ func (ms *MongoSync) processOpLog(ctx context.Context) {
 	// that channel is served by dedicated goroutine
 	ms.collChan = make(map[string]chan<- bson.Raw, 128)
 	// loop until context tells we are done
-	for {
-		var op bson.Raw
-		select {
-		case <-ctx.Done():
+	for op := range ms.oplog {
+		if ctx.Err() != nil {
 			return
-		case op = <-ms.oplog:
-		case <-time.After(idleTimeout):
-			log.Infof("processOpLog: idle true")
-			ms.setOplogIdle(true)
-			continue
 		}
 		// find out the name of the collection
 		// check if it is synced
@@ -189,8 +199,6 @@ func (ms *MongoSync) processOpLog(ctx context.Context) {
 		if config == nil {
 			continue // ignore sync for this collection
 		}
-		log.Tracef("oplog coll %s, size %d", coll, len(op))
-		ms.setOplogIdle(false)
 		// find out the channel for collection
 		if ch, ok := ms.collChan[coll]; ok {
 			// if a channel is there - the sync is underway, no need for other checks

@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 	"yadex/config"
 	"yadex/mdb"
 )
@@ -34,7 +35,14 @@ type BulkWriteOp struct {
 	TotalBytes int
 }
 
+type BWLog struct {
+	duration time.Duration
+	bytes    int
+}
+
 type Oplog = <-chan bson.Raw
+
+const bwLogSize = 256
 
 type MongoSync struct {
 	ctx               context.Context
@@ -54,13 +62,14 @@ type MongoSync struct {
 	collChan          map[string]chan<- bson.Raw // any collection has it's dedicated channel with dedicated goroutine.
 	// checkIdle facility, see checkIdle.go
 	wgRT             sync.WaitGroup // this is used to prevent ST BulkWrites clash over RT ones
-	oplogIdle        bool
-	oplogMutex       sync.RWMutex
 	collBuffers      map[string]int
 	pendingBuffers   int // pending bytes in collection's buffers
 	collBuffersMutex sync.RWMutex
 	pendingBulkWrite int // total of bulkWrite buffers queued at bwRT and bwST channels
+	totalBulkWrite   int // this counts total bytes flushed to the receiver
 	bulkWriteMutex   sync.RWMutex
+	bwLog            [bwLogSize]BWLog
+	bwLogIndex       int
 	// flushUpdates is for FLUSH signal when oplog idling
 	flushUpdates chan struct{}
 	// idle is triggered from flushUpdates when there is nothing left unsent to the server
@@ -105,14 +114,34 @@ func NewMongoSync(ctx context.Context, exchCfg *config.ExchangeConfig) (*MongoSy
 // It is used after Stop in a case of Exchange is not available (either sender or receiver)
 // So it creates all channels and trying to resume from the safe point
 func (ms *MongoSync) Run(ctx context.Context) {
-	senderAvail := true
-	receiverAvail := true
-	exAvail := true
+	senderAvail := false
+	receiverAvail := false
 	oldAvail := false
 	exCtx, exCancel := context.WithCancel(ctx)
 	// this loop watches over parent context and exchange's connections available
 	// if they are not, it cancels exCtx so derived channels could be closed and synchronization stopped
 	for {
+		select {
+		case <-ctx.Done():
+			ctx := context.TODO()
+			_ = ms.senderClient.Disconnect(ctx)
+			_ = ms.receiverClient.Disconnect(ctx)
+			exCancel()
+			return
+		case senderAvail = <-ms.senderAvailable:
+			if senderAvail {
+				log.Infof("sender %s is available", ms.Config.SenderURI)
+			} else {
+				log.Warnf("sender %s is not available", ms.Config.SenderURI)
+			}
+		case receiverAvail = <-ms.receiverAvailable:
+			if receiverAvail {
+				log.Infof("receiver %s is available", ms.Config.ReceiverURI)
+			} else {
+				log.Warnf("receiver %s is not available", ms.Config.ReceiverURI)
+			}
+		}
+		exAvail := senderAvail && receiverAvail
 		if oldAvail != exAvail {
 			sAvail, rAvail := "", ""
 			if !senderAvail {
@@ -123,6 +152,7 @@ func (ms *MongoSync) Run(ctx context.Context) {
 			}
 			log.Debugf("sender:%s available, receiver:%s available", sAvail, rAvail)
 			if exAvail {
+				log.Infof("running exchange %s...", ms.Name())
 				ms.routines.Add(1)
 				log.Infof("Connection available, start syncing of %s again...", ms.Name())
 				go ms.runSync(exCtx)
@@ -134,17 +164,6 @@ func (ms *MongoSync) Run(ctx context.Context) {
 			}
 			oldAvail = exAvail
 		}
-		select {
-		case <-ctx.Done():
-			ctx := context.TODO()
-			_ = ms.senderClient.Disconnect(ctx)
-			_ = ms.receiverClient.Disconnect(ctx)
-			exCancel()
-			return
-		case senderAvail = <-ms.senderAvailable:
-		case receiverAvail = <-ms.receiverAvailable:
-		}
-		exAvail = senderAvail && receiverAvail
 	}
 }
 

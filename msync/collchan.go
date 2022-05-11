@@ -2,6 +2,7 @@ package mongosync
 
 import (
 	"context"
+	"fmt"
 	log "github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -22,7 +23,7 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 	totalBytes := 0
 	// flush bulkWrite models or drop operation into BulkWrite channel
 	flushed := time.Now()
-	flush := func() {
+	flush := func(reason string) {
 		if ctx.Err() != nil {
 			return
 		}
@@ -46,6 +47,7 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 			bwOp.TotalBytes = totalBytes
 		}
 		models = nil
+		log.Tracef("flusing %s %d %d due %s", collName, count, totalBytes, reason)
 		totalBytes = 0
 		ms.setCollUpdateTotal(collName, totalBytes)
 		ms.putBwOp(bwOp)
@@ -64,7 +66,7 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 			if op == nil {
 				// this is from timer (go <-time.After(maxFlushDelay))
 				// or from flushUpdates
-				flush()
+				flush("timeout/flushUpdate")
 				continue
 			}
 			opType, writeModel := getWriteModel(op)
@@ -73,7 +75,7 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 			case OpLogOrdered, OpLogUnordered:
 				if lastOpType != opType && (lastOpType == OpLogOrdered || lastOpType == OpLogUnordered) {
 					log.Tracef("coll %s flush on opLogOrder %v", collName, opType)
-					flush()
+					flush("changed OpLoOrder")
 				}
 			case OpLogDrop:
 				models = nil
@@ -81,7 +83,7 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 				lastOpType = opType
 				// opLogDrop flushed immediately
 				log.Tracef("coll %s flush on opLogDrop", collName)
-				flush()
+				flush("opLogDrop")
 				continue
 			case OpLogUnknown: // ignore op
 				log.Warnf("Operation of unknown type left unhandled:%+v", op)
@@ -94,7 +96,7 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 			totalBytes += len(op)
 			if totalBytes >= maxBatch {
 				log.Tracef("coll %s flush on bulk size %d", collName, maxBatch)
-				flush()
+				flush(fmt.Sprintf("%d > maxBatch %d", totalBytes, maxBatch))
 			} else if len(models) == 1 {
 				// we just put 1st item, set timer to flush after maxFlushDelay
 				// unless it is filled up to (max)maxBatch items
