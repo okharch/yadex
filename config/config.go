@@ -154,7 +154,7 @@ func MakeWatchConfigChannel(ctx context.Context, configFileName string) chan *Co
 				postponeReload = infiniteDuration
 				rereadConfig()
 			case err := <-watcher.Errors:
-				log.Errorf("Watch config file %s error:%s", configFileName, err)
+				log.Errorf("Watch config file %s error: %s", configFileName, err)
 			}
 		}
 	}()
