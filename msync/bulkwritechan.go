@@ -7,90 +7,130 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"strconv"
+	"sync"
 	"time"
+	"yadex/utils"
 )
 
-// initSync creates bwRT and bwST chan *BulkWriteOp  used to add bulkWrite operation to buffered channel
+// BulkWriteOp describes postponed (bulkWrite) operation of modification which is sent to the receiver
+type BulkWriteOp struct {
+	Coll       string
+	RealTime   bool
+	OpType     OpLogType
+	SyncId     string
+	Models     []mongo.WriteModel
+	TotalBytes int
+	// RT related
+	Lock    *sync.Mutex // avoid simultaneous BulkWrite for the same RT collection
+	Expires time.Time   // time when RT batch expires
+}
+
+type BWLog struct {
+	duration time.Duration
+	bytes    int
+}
+
+// initSync creates bulkWriteRT and bulkWriteST chan *BulkWriteOp  used to add bulkWrite operation to buffered channel
 // also it initializes collection CollSyncId to update sync progress
 // bwPut channel is used for signalling there is pending BulkWrite op
 // it launches serveBWChan goroutine which serves  operation from those channel and
-func (ms *MongoSync) initSync(ctx context.Context) {
+func (ms *MongoSync) initSync(_ context.Context) {
+	// each collection has separate channel for receiving its events.
+	// that channel is served by dedicated goroutine
+	ms.collChan = make(map[string]chan<- bson.Raw, 128)
+	//
 	ms.collBuffers = make(map[string]int)
 	// get name of bookmarkColSyncid on sender
 	log.Tracef("initSync")
-	// create buffered (3) BulkWrite channel
-	ms.bwRT = make(chan *BulkWriteOp, 3)
-	ms.bwST = make(chan *BulkWriteOp)
+	// init channels before serving routines
+	ms.bulkWriteST = make(chan *BulkWriteOp)
+	ms.bulkWriteRT = make(chan *BulkWriteOp)
+	ms.idleST = make(chan bool)
+	ms.idleRT = make(chan bool)
 	// signalling channels
+	ms.flush = make(chan struct{})
 	ms.idle = make(chan struct{})
-	ms.flushUpdates = make(chan struct{})
-
-	ms.routines.Add(6)
-	// close channels on expired context
-	go func() {
-		defer ms.routines.Done()
-		<-ctx.Done()
-		close(ms.bwST)
-		close(ms.bwRT)
-		close(ms.idle)
-		close(ms.flushUpdates)
-	}()
-
-	go func() {
-		defer ms.routines.Done()
-		for range time.Tick(time.Second) {
-			if ctx.Err() != nil {
-				return
-			}
-			if ms.getPendingBuffers() > 0 {
-				log.Tracef("BulkWriteOp: avg speed %s bytes/sec", IntCommaB(ms.getBWSpeed()))
-			}
-		}
-	}()
-
-	// runSync few parallel serveBWChan() goroutines
-	// 2 RT servers
-	go ms.serveRTChan(ctx)
-	go ms.serveRTChan(ctx)
-	// 1 ST
-	go ms.serveSTChan(ctx)
-	// flushUpdates server
-	go ms.serveFlushUpdates(ctx)
 }
 
-func (ms *MongoSync) serveRTChan(ctx context.Context) {
+func (ms *MongoSync) showSpeed(ctx context.Context) {
 	defer ms.routines.Done()
-	log.Trace("serveRTChan")
-	for bwOp := range ms.bwRT {
-		ms.wgRT.Add(1)
-		ms.BulkWriteOp(ctx, bwOp)
-		ms.wgRT.Done()
+	for range time.Tick(time.Second) {
+		if ctx.Err() != nil {
+			return
+		}
+		if ms.getPendingBuffers() > 0 {
+			log.Tracef("BulkWriteOp: avg speed %s bytes/sec", utils.IntCommaB(ms.getBWSpeed()))
+		}
 	}
 }
 
-// serveSTChan serves bwST channel, waits outputClear state before call ms.BulkWriteOp(ctx, bwOp)
-func (ms *MongoSync) serveSTChan(ctx context.Context) {
+func (ms *MongoSync) closeOnCtxDone(ctx context.Context) {
 	defer ms.routines.Done()
-	log.Trace("serveSTChan")
-	for bwOp := range ms.bwST {
-		log.Tracef("serveSTChan:wgRT.Wait() %s %d", bwOp.Coll, bwOp.TotalBytes)
+	<-ctx.Done()
+	close(ms.oplogST)
+	close(ms.oplogRT)
+	close(ms.bulkWriteST)
+	close(ms.bulkWriteRT)
+	close(ms.idleST)
+	close(ms.idleRT)
+	close(ms.idle)
+	close(ms.flush)
+}
+
+func (ms *MongoSync) runRTBulkWrite(ctx context.Context) {
+	defer ms.routines.Done()
+	const ConcurrentWrites = 3
+	rtWrites := make(chan struct{}, ConcurrentWrites)
+	log.Trace("runRTBulkWrite")
+	for bwOp := range ms.bulkWriteRT {
+		if ctx.Err() != nil {
+			return
+		}
+		if bwOp.Expires.Before(time.Now()) {
+			log.Warnf("drop batch for coll %s (%d/%d): expired: %v<%v", bwOp.Coll, len(bwOp.Models), bwOp.TotalBytes, bwOp.Expires, time.Now())
+			ms.addBulkWrite(-bwOp.TotalBytes)
+			continue
+		}
+		ms.wgRT.Add(1)
+		go func(bwOp *BulkWriteOp) {
+			bwOp.Lock.Lock()
+			rtWrites <- struct{}{} // take write capacity, blocks if channel is full
+			// as it might take time to acquire lock and write capacity, let's check expiration again before going write
+			if bwOp.Expires.Before(time.Now()) {
+				log.Warnf("drop batch for coll %s (%d/%d): expired: %v < %v", bwOp.Coll, len(bwOp.Models), bwOp.TotalBytes, bwOp.Expires,
+					time.Now())
+			} else if ctx.Err() == nil {
+				ms.BulkWriteOp(ctx, bwOp)
+			}
+			ms.addBulkWrite(-bwOp.TotalBytes)
+			<-rtWrites // return write capacity by popping value from channel
+			bwOp.Lock.Unlock()
+			ms.wgRT.Done()
+		}(bwOp)
+	}
+}
+
+// runSTBulkWrite serves bulkWriteST channel, waits outputClear state before call ms.BulkWriteOp(ctx, bwOp)
+func (ms *MongoSync) runSTBulkWrite(ctx context.Context) {
+	defer ms.routines.Done()
+	log.Trace("runSTBulkWrite")
+	for bwOp := range ms.bulkWriteST {
+		log.Tracef("runSTBulkWrite:wgRT.Wait() %s %d", bwOp.Coll, bwOp.TotalBytes)
 		ms.wgRT.Wait()
 		ms.BulkWriteOp(ctx, bwOp)
+		ms.addBulkWrite(-bwOp.TotalBytes)
 	}
 }
 
-// putBwOp puts BulkWriteOp to either RT or ST channel for BulkWrite operations.
-// Also, it puts signal to bwPut channel to inform serveBWChan
-// there is a pending event in either of two channels.
+// putBwOp puts BulkWriteOp to either bulkWriteRT or bulkWriteST channel for BulkWrite operations.
 func (ms *MongoSync) putBwOp(bwOp *BulkWriteOp) {
 	ms.addBulkWrite(bwOp.TotalBytes)
 	if bwOp.RealTime {
 		log.Tracef("putBwOp put RT %s %d(%d) records", bwOp.Coll, len(bwOp.Models), bwOp.TotalBytes)
-		ms.bwRT <- bwOp
+		ms.bulkWriteRT <- bwOp
 	} else {
 		log.Tracef("putBwOp put ST %s %d(%d) records", bwOp.Coll, len(bwOp.Models), bwOp.TotalBytes)
-		ms.bwST <- bwOp
+		ms.bulkWriteST <- bwOp
 	}
 }
 
@@ -99,7 +139,6 @@ func (ms *MongoSync) BulkWriteOp(ctx context.Context, bwOp *BulkWriteOp) {
 	if ctx.Err() != nil {
 		return
 	}
-	defer ms.addBulkWrite(-bwOp.TotalBytes)
 	log.Tracef("BulkWriteOp %s %d", bwOp.Coll, bwOp.TotalBytes)
 	collAtReceiver := ms.Receiver.Collection(bwOp.Coll)
 	if bwOp.OpType == OpLogDrop {
@@ -150,35 +189,6 @@ func (ms *MongoSync) BulkWriteOp(ctx context.Context, bwOp *BulkWriteOp) {
 		} else {
 			log.Tracef("Coll found(updated) %d(%d) %s.sync_id %s", r.MatchedCount, r.UpsertedCount+r.ModifiedCount, bwOp.Coll,
 				bwOp.SyncId)
-		}
-	}
-}
-
-func IntCommaB(num int) string {
-	str := strconv.Itoa(num)
-	l_str := len(str)
-	digits := l_str
-	if num < 0 {
-		digits--
-	}
-	commas := (digits+2)/3 - 1
-	l_buf := l_str + commas
-	var sbuf [32]byte // pre allocate buffer at stack rather than make([]byte,n)
-	buf := sbuf[0:l_buf]
-	// copy str from the end
-	for s_i, b_i, c3 := l_str-1, l_buf-1, 0; ; {
-		buf[b_i] = str[s_i]
-		if s_i == 0 {
-			return string(buf)
-		}
-		s_i--
-		b_i--
-		// insert comma every 3 chars
-		c3++
-		if c3 == 3 && (s_i > 0 || num > 0) {
-			buf[b_i] = ','
-			b_i--
-			c3 = 0
 		}
 	}
 }

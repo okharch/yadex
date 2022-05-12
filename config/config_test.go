@@ -20,7 +20,11 @@ func TestMakeWatchConfigChannel(t *testing.T) {
 				SenderDB:    "IonM",
 				ReceiverURI: "mongodb://localhost:27023",
 				ReceiverDB:  "IonM",
-				RT:          map[string]*DataSync{"realtime": {}},
+				RT: map[string]*DataSync{"realtime": {
+					MinDelay: 301,
+					Delay:    300,
+					Expires:  299,
+				}},
 				ST: map[string]*DataSync{".*": {
 					MinDelay: 1100,
 					Delay:    1000,
@@ -51,14 +55,22 @@ func TestMakeWatchConfigChannel(t *testing.T) {
 	require.Equal(t, x.SenderURI, x1.SenderURI)
 
 	// make sure it set default values for omitted fields in config
-	require.Equal(t, 0, x.RT["realtime"].MinDelay)
-	require.Equal(t, RTMinDelayDefault, x1.RT["realtime"].MinDelay)
-	require.Equal(t, 0, x.RT["realtime"].Delay)
-	require.Equal(t, RTDelayDefault, x1.RT["realtime"].Delay)
-	require.Equal(t, 0, x.RT["realtime"].Batch)
-	require.Equal(t, RTBatchDefault, x1.RT["realtime"].Batch)
+	xRT := x.RT["realtime"]
+	require.NotNil(t, xRT)
+	x1RT := x1.RT["realtime"]
+	require.NotNil(t, x1RT)
+	require.Equal(t, 301, xRT.MinDelay)
+	require.Equal(t, 249, x1RT.MinDelay)
+	require.Equal(t, 300, xRT.Delay)
+	require.Equal(t, 249, x1RT.Delay)
+	require.Equal(t, 0, xRT.Batch)
+	require.Equal(t, RTBatchDefault, x1RT.Batch)
 
 	// make sure it fixes error minDelay>MaxDelay
+	require.Greater(t, x.ST[".*"].MinDelay, x.ST[".*"].Delay)
+	require.GreaterOrEqual(t, x1.ST[".*"].Delay, x1.ST[".*"].MinDelay)
+
+	// make sure it fixes RT.Delay for Expires
 	require.Greater(t, x.ST[".*"].MinDelay, x.ST[".*"].Delay)
 	require.GreaterOrEqual(t, x1.ST[".*"].Delay, x1.ST[".*"].MinDelay)
 

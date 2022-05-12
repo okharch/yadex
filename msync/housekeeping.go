@@ -5,8 +5,6 @@ import (
 	"time"
 )
 
-const idleTimeout = time.Millisecond * 1000
-
 // checkIdle facility created in order to detect situation
 // when there is no incoming records
 // and all the pending buffers with updates have been flushed.
@@ -86,10 +84,12 @@ func (ms *MongoSync) checkIdle(reason string) {
 			handled := Signal(ms.idle)
 			log.Tracef("checkIdle:%s:Sent IDLE signal, handled: %v", reason, handled)
 		} else {
-			handled := Signal(ms.flushUpdates)
+			ClearSignal(ms.idle)
+			handled := Signal(ms.flush)
 			log.Tracef("checkIdle:%s:Sent FLUSH signal (%d pending), handled: %v", reason, pendingBuffers, handled)
 		}
 	} else {
+		ClearSignal(ms.idle)
 		log.Tracef("checkIdle:%s: pending pending bw %d: no signals", reason, pendingBulkWrite)
 	}
 }
@@ -103,4 +103,15 @@ func Signal(ch chan struct{}) bool {
 	default:
 	}
 	return false
+}
+
+func ClearSignal(ch chan struct{}) {
+	for {
+		// nb read from channel until empty
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
 }

@@ -6,6 +6,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
+	"sync"
 	"time"
 	"yadex/config"
 )
@@ -14,6 +15,7 @@ import (
 // it launches goroutine which pops operation from that channel and flushes BulkWriteOp using putBWOp func
 func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *config.DataSync, realtime bool) chan<- bson.Raw {
 	in := make(chan bson.Raw, 2) // non-blocking, otherwise setCollUpdateTotal might deadlock
+	var bwLock sync.Mutex
 	// buffer for BulkWrite
 	minFlushDelay, maxFlushDelay, maxBatch := config.MinDelay, config.Delay, config.Batch
 	var models []mongo.WriteModel
@@ -42,6 +44,10 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 			syncId = getSyncId(lastOp)
 		}
 		bwOp := &BulkWriteOp{Coll: collName, RealTime: realtime, OpType: lastOpType, SyncId: syncId}
+		if realtime {
+			bwOp.Lock = &bwLock
+			bwOp.Expires = time.Now().Add(time.Duration(config.Expires) * time.Millisecond)
+		}
 		if lastOpType != OpLogDrop {
 			bwOp.Models = models
 			bwOp.TotalBytes = totalBytes
@@ -54,9 +60,9 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 		flushed = time.Now()
 	}
 	// process channel of Oplog, collects similar operation to batches, flushing them to bulkWriteChan
-	go func() { // oplog for collection
+	go func() { // oplogST for collection
 		defer ftCancel()
-		for { // oplog can be buffered, so w
+		for { // oplogST can be buffered, so w
 			var op bson.Raw
 			select {
 			case <-ctx.Done():
@@ -65,7 +71,7 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 			}
 			if op == nil {
 				// this is from timer (go <-time.After(maxFlushDelay))
-				// or from flushUpdates
+				// or from flush
 				flush("timeout/flushUpdate")
 				continue
 			}
@@ -120,10 +126,10 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 	return in
 }
 
-// flushUpdates sends "flush" signal to all the channels having dirty buffer
-func (ms *MongoSync) serveFlushUpdates(ctx context.Context) {
+// flush sends "flush" signal to all the channels having dirty buffer
+func (ms *MongoSync) runFlush(ctx context.Context) {
 	defer ms.routines.Done()
-	for range ms.flushUpdates {
+	for range ms.flush {
 		ms.collBuffersMutex.RLock()
 		collChans := make([]chan<- bson.Raw, len(ms.collBuffers))
 		count := 0
@@ -134,7 +140,7 @@ func (ms *MongoSync) serveFlushUpdates(ctx context.Context) {
 		ms.collBuffersMutex.RUnlock()
 		for _, collChan := range collChans {
 			if ctx.Err() != nil {
-				return
+				return // otherwise, we might as well send nil to closed channel
 			}
 			collChan <- nil // flush
 		}

@@ -9,11 +9,13 @@ import (
 )
 
 func TestGetDbOpLog(t *testing.T) {
-	ms, err := NewMongoSync(context.TODO(), ExchCfg)
+	ctx := context.TODO()
+	ms, err := NewMongoSync(ctx, ExchCfg)
 	require.NoError(t, err)
 	require.NotNil(t, ms)
+	ms.initSync(ctx)
 	ctx, cancel := context.WithCancel(context.TODO())
-	opCh, err := ms.GetDbOpLog(ctx, ms.Sender, "")
+	opCh, err := ms.GetDbOpLog(ctx, ms.Sender, "", ms.idleST)
 	ir, err := ms.Sender.Collection("test").InsertOne(ctx, bson.D{{}})
 	require.NoError(t, err)
 	op := <-opCh

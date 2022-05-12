@@ -20,6 +20,7 @@ const (
 	STDelayDefault    = 2000
 	RTBatchDefault    = 512  // if pending RT batch reaches this size it will be flushed
 	STBatchDefault    = 8192 // if pending ST batch reaches this size it will be flushed
+	RTExpiresDefault  = 5000 // 5 seconds this data expires, can drop batch
 	DefaultDB         = "IonM"
 )
 
@@ -28,6 +29,7 @@ type (
 		MinDelay int      // minimal ms delay before consequential flush of buffers
 		Delay    int      // max delay before flush
 		Batch    int      // max size before flush
+		Expires  int      // in how many ms this data expires. Expired RT Data will not be sent
 		Exclude  []string // Regexp of colls to exclude
 	}
 	ExchangeConfig struct {
@@ -73,6 +75,15 @@ func ReadConfig(configFile string) (*Config, error) {
 		for key, r := range e.RT {
 			setIntDefault(&r.MinDelay, RTMinDelayDefault)
 			setIntDefault(&r.Delay, RTDelayDefault)
+			setIntDefault(&r.Expires, RTExpiresDefault)
+			if r.MinDelay >= r.Expires {
+				log.Warnf("found [%d].RT.%s.MinDelay(%d) >= than Expires(%d), set to Expires-50", i, key, r.MinDelay, r.Expires)
+				r.MinDelay = r.Expires - 50
+			}
+			if r.Delay >= r.Expires {
+				log.Warnf("found [%d].RT.%s.Delay(%d) >= than Expires(%d), set to Expires-50", i, key, r.Delay, r.Expires)
+				r.Delay = r.Expires - 50
+			}
 			if r.Delay < r.MinDelay {
 				log.Warnf("found [%d].RT.%s.Delay(%d) less than MinDelay(%d), set to MinDelay", i, key, r.Delay, r.MinDelay)
 				r.Delay = r.MinDelay

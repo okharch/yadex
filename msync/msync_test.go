@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 	"yadex/config"
+	"yadex/utils"
 )
 
 var c = &config.Config{
@@ -35,14 +36,14 @@ var c = &config.Config{
 }
 
 func TestNewMongoSync(t *testing.T) {
-	// create mongosync
+	// create mongoSync
 	config.SetLogger(log.InfoLevel)
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
 	ms, err := NewMongoSync(ctx, c.Exchanges[0])
 	require.Nil(t, err)
 	require.NotNil(t, ms)
-	// wait for possible oplog processing
+	// wait for possible oplogST processing
 }
 
 // TestSync test
@@ -69,15 +70,15 @@ func TestSync(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		ms.Run(ctx)
-		log.Info("Gracefully leaving mongosync.Run")
+		log.Info("Gracefully leaving mongoSync.Run")
 	}()
 	receiverColl := ms.Receiver.Collection(collName)
 	require.NoError(t, receiverColl.Drop(ctx))
 	coll := ms.Sender.Collection(collName)
 	require.NoError(t, coll.Drop(ctx))
 	ir, err := coll.InsertOne(ctx, bson.D{{"name", "one"}})
-	const countMany = int64(10000)
-	const countLoop = int64(60)
+	const countMany = int64(50000)
+	const countLoop = int64(10)
 	var ids []interface{}
 	for i := int64(0); i < countLoop; i++ {
 		ir, err := coll.InsertMany(ctx, CreateDocs(i*countMany+1, countMany))
@@ -106,5 +107,5 @@ func TestSync(t *testing.T) {
 	require.Equal(t, countMany*countLoop, c)
 	duration := time.Since(started)
 	log.Infof("Transferred %d bytes in %v, avg speed %s b/s", ms.totalBulkWrite, duration,
-		IntCommaB(ms.totalBulkWrite*int(time.Second)/int(duration)))
+		utils.IntCommaB(ms.totalBulkWrite*int(time.Second)/int(duration)))
 }

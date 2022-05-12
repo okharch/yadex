@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 	"yadex/config"
 	"yadex/mdb"
 )
@@ -25,54 +24,42 @@ const (
 	OpLogDrop                       // indicates current operation is drop
 )
 
-// BulkWriteOp describes postponed (bulkWrite) operation of modification which is sent to the receiver
-type BulkWriteOp struct {
-	Coll       string
-	RealTime   bool
-	OpType     OpLogType
-	SyncId     string
-	Models     []mongo.WriteModel
-	TotalBytes int
-}
-
-type BWLog struct {
-	duration time.Duration
-	bytes    int
-}
-
-type Oplog = <-chan bson.Raw
+type Oplog chan bson.Raw
 
 const bwLogSize = 256
 
 type MongoSync struct {
-	ctx               context.Context
-	cancelFunc        context.CancelFunc
-	Sender, Receiver  *mongo.Database
-	senderClient      *mongo.Client
-	receiverClient    *mongo.Client
-	senderAvailable   chan bool         // this channel follows availability of the sender server
-	receiverAvailable chan bool         // this channel follows availability of the receiver server
-	bwRT, bwST        chan *BulkWriteOp // channels for RT and ST BulkWrites
-	Config            *config.ExchangeConfig
-	collSyncId        map[string]string
-	routines          sync.WaitGroup // housekeeping of runSync. it is zero on exit
-	CollSyncId        *mongo.Collection
-	oplog             Oplog
-	collMatch         CollMatch
-	collChan          map[string]chan<- bson.Raw // any collection has it's dedicated channel with dedicated goroutine.
+	ctx                      context.Context
+	cancelFunc               context.CancelFunc
+	Sender, Receiver         *mongo.Database
+	senderClient             *mongo.Client
+	receiverClient           *mongo.Client
+	senderAvailable          chan bool         // this channel follows availability of the sender server
+	receiverAvailable        chan bool         // this channel follows availability of the receiver server
+	bulkWriteRT, bulkWriteST chan *BulkWriteOp // channels for RT and ST BulkWrites
+	Config                   *config.ExchangeConfig
+	collSyncId               map[string]string
+	routines                 sync.WaitGroup // housekeeping of runSync. it is zero on exit
+	CollSyncId               *mongo.Collection
+	idleST                   chan bool // declare the idleST state for oplogST
+	idleRT                   chan bool // declare the idleRT state for oplogRT
+	oplogST                  Oplog     // follow ST changes
+	oplogRT                  Oplog     // follow RT changes
+	collMatch                CollMatch
+	collChan                 map[string]chan<- bson.Raw // any collection has it's dedicated channel with dedicated goroutine.
 	// checkIdle facility, see checkIdle.go
 	wgRT             sync.WaitGroup // this is used to prevent ST BulkWrites clash over RT ones
-	collBuffers      map[string]int
-	pendingBuffers   int // pending bytes in collection's buffers
+	collBuffers      map[string]int // collName=>collBytes stores how many bytes pending in a collection buffer
+	pendingBuffers   int            // pending bytes in collection's buffers
 	collBuffersMutex sync.RWMutex
-	pendingBulkWrite int // total of bulkWrite buffers queued at bwRT and bwST channels
+	pendingBulkWrite int // total of bulkWrite buffers queued at bulkWriteRT and bulkWriteST channels
 	totalBulkWrite   int // this counts total bytes flushed to the receiver
 	bulkWriteMutex   sync.RWMutex
 	bwLog            [bwLogSize]BWLog
 	bwLogIndex       int
-	// flushUpdates is for FLUSH signal when oplog idling
-	flushUpdates chan struct{}
-	// idle is triggered from flushUpdates when there is nothing left unsent to the server
+	// flush is for FLUSH signal when oplogST idling
+	flush chan struct{}
+	// idle is triggered from BulkWrite when there is nothing left unsent to the server
 	idle chan struct{}
 }
 
@@ -153,7 +140,6 @@ func (ms *MongoSync) Run(ctx context.Context) {
 			log.Debugf("sender:%s available, receiver:%s available", sAvail, rAvail)
 			if exAvail {
 				log.Infof("running exchange %s...", ms.Name())
-				ms.routines.Add(1)
 				log.Infof("Connection available, start syncing of %s again...", ms.Name())
 				go ms.runSync(exCtx)
 			} else {
@@ -173,23 +159,24 @@ func (ms *MongoSync) Run(ctx context.Context) {
 // it creates all the channels and trying to resume from the safe point
 func (ms *MongoSync) runSync(ctx context.Context) {
 	// create func to put BulkWriteOp into channel. It deals appropriate both with RT and ST
-	defer ms.routines.Done()
 	ms.initSync(ctx)
-	err := ms.resumeOplog(ctx)
-	if ctx.Err() != nil {
-		return // gracefully handle sync.Stop
-	}
-	if err != nil {
-		log.Errorf("Can't resume oplog: %s", err)
-		return
-	}
-	// clone collections which we don't have bookmarks for restoring from oplog
-	if err := ms.SyncCollections(ctx); err != nil {
-		log.Errorf("failed to copy collections: %s, waiting for another chance", err)
-		return
-	}
-	// start handling oplog for syncing sender and receiver collections
-	ms.processOpLog(ctx)
+	ms.routines.Add(9)
+	// close channels on expired context
+	go ms.closeOnCtxDone(ctx)
+	// show avg speed of BulkWrite ops to the log
+	go ms.showSpeed(ctx) // optional, comment out if not needed
+	// runSync few parallel serveBWChan() goroutines
+	go ms.runRTBulkWrite(ctx)
+	// 1 ST
+	go ms.runSTBulkWrite(ctx)
+	// flush server
+	go ms.runFlush(ctx)
+	// start handling oplogST for syncing sender and receiver collections
+	go ms.runSToplog(ctx)
+	go ms.runRToplog(ctx)
+	go ms.SyncCollections(ctx)
+	go ms.runIdle(ctx)
+	ms.routines.Wait()
 }
 
 func (ms *MongoSync) Name() string {

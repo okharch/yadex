@@ -82,15 +82,16 @@ func (ms *MongoSync) syncCollection(ctx context.Context, collName string, maxBul
 // SyncCollections checks for all collections from database
 // whether they should be synced at all using delay != -1 flag
 // Then before calling syncCollection for a collection it remembers last SyncId,
-// so it can start dealing with oplog starting with that Id
+// so it can start dealing with oplogST starting with that Id
 // it returns nil if it was able to clone all the collections
 // successfully into chBulkWriteOps channels
-func (ms *MongoSync) SyncCollections(ctx context.Context) error {
+func (ms *MongoSync) SyncCollections(ctx context.Context) {
 	// here we clone those collections which does not have sync_id
 	// get all collections from database and clone those without sync_id
 	colls, err := ms.Sender.ListCollectionNames(ctx, allRecords)
 	if err != nil {
-		return err
+		log.Errorf("critical error:failed to obtain collection list: %s", err)
+		return
 	}
 	for _, coll := range colls {
 		config, rt := ms.collMatch(coll)
@@ -101,13 +102,14 @@ func (ms *MongoSync) SyncCollections(ctx context.Context) error {
 		if _, ok := ms.collSyncId[coll]; !ok {
 			lastSyncId, err := getLastSyncId(ctx, ms.Sender)
 			if err != nil {
-				return fmt.Errorf("Can't fetch SyncId to start replication after collection %s clone: %w", coll, err)
+				log.Errorf("Can't fetch SyncId to start replication after collection %s clone: %s: make sure oplog is on", coll, err)
+				return // this is fatal
 			}
 			if err := ms.syncCollection(ctx, coll, config.Batch, lastSyncId); err != nil {
-				return fmt.Errorf("failed to clone collection %s to receiver: %w", coll, err)
+				log.Errorf("failed to clone collection %s to receiver: %s", coll, err)
 			}
 			ms.collSyncId[coll] = lastSyncId
 		}
 	}
-	return nil
+	return
 }
