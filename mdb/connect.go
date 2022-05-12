@@ -11,42 +11,56 @@ import (
 // ConnectMongo connections state is broadcast by available channel.
 // unless channel returned true there is no possibility to work with the connection
 func ConnectMongo(ctx context.Context, uri string) (client *mongo.Client, available chan bool, err error) {
-	available = make(chan bool, 2)
-	showStatus := false
+	available = make(chan bool, 1)
 	svrMonitor := &event.ServerMonitor{
+		ServerClosed: func(openingEvent *event.ServerClosedEvent) {
+			log.Infof("server %s closed", uri)
+			SendNB(available, false)
+		},
 		TopologyDescriptionChanged: func(changedEvent *event.TopologyDescriptionChangedEvent) {
 			servers := changedEvent.NewDescription.Servers
 			avail := false
 			for _, server := range servers {
 				if server.AverageRTTSet {
 					avail = true
+					break
 				}
 			}
-			if showStatus {
-				if !avail {
-					log.Warnf("server %s is down", uri)
-				} else {
-					log.Infof("server %s is up", uri)
-				}
+			if !avail {
+				log.Warnf("server %s is down", uri)
+			} else {
+				log.Infof("server %s is up", uri)
 			}
-			available <- avail
+			SendNB(available, avail)
 		},
 	}
 	clientOpts := options.Client().ApplyURI(uri).SetServerMonitor(svrMonitor)
 	client, err = mongo.Connect(ctx, clientOpts)
-
-	// wait until available
-	avail := false
-	for !avail {
-		select {
-		case <-ctx.Done():
-			avail = true
-		case <-time.After(time.Second):
-			avail = true
-		case avail = <-available:
+	avail := <-available
+	if !avail {
+		expire := time.Now().Add(time.Second)
+		for !avail && time.Now().Before(expire) {
+			select {
+			case avail = <-available:
+			case <-time.After(time.Millisecond * 500):
+			}
 		}
 	}
-
-	showStatus = true
+	SendNB(available, avail)
 	return client, available, ctx.Err()
+}
+
+func SendNB(ch chan bool, val bool) {
+	// empty, then put
+	for {
+		select {
+		case <-ch:
+		default:
+			select {
+			case ch <- val:
+			default:
+			}
+			return
+		}
+	}
 }
