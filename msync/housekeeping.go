@@ -81,10 +81,7 @@ func (ms *MongoSync) WaitIdle(timeout time.Duration) {
 	<-ms.idle
 }
 
-func (ms *MongoSync) checkIdle(reason string, timeout time.Duration) {
-	if timeout != 0 {
-		time.Sleep(timeout) // give chance to flush buffers
-	}
+func (ms *MongoSync) checkIdle(reason string) {
 	ms.Lock()
 	if ms.pendingBulkWrite == 0 && ms.pendingBuffers == 0 {
 		// close channels, clear collChan

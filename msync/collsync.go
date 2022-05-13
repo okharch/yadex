@@ -85,6 +85,7 @@ func (ms *MongoSync) syncCollection(ctx context.Context, collName string, maxBul
 // it returns nil if it was able to clone all the collections
 // successfully into chBulkWriteOps channels
 func (ms *MongoSync) SyncCollections(ctx context.Context) {
+	defer ms.routines.Done() // SyncCollections
 	// here we clone those collections which does not have sync_id
 	// get all collections from database and clone those without sync_id
 	colls, err := ms.Sender.ListCollectionNames(ctx, allRecords)
@@ -93,6 +94,10 @@ func (ms *MongoSync) SyncCollections(ctx context.Context) {
 		return
 	}
 	for _, coll := range colls {
+		if ctx.Err() != nil {
+			log.Debugf("SyncCollections gracefully shutdown on cancelled context")
+			return
+		}
 		config, rt := ms.collMatch(coll)
 		if config == nil || rt {
 			continue

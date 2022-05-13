@@ -27,20 +27,29 @@ func getChangeStream(ctx context.Context, sender *mongo.Database, syncId string)
 	return sender.Watch(ctx, pipeline, opts)
 }
 func (ms *MongoSync) runIdle(ctx context.Context) {
-	defer ms.routines.Done()
+	defer ms.routines.Done() // runIdle
 	idleST, idleRT := true, true
 	if ms.idleST == nil || ms.idleRT == nil {
 		log.Fatal("idle channels not initialized")
 	}
 	for {
+		timer := false
 		select {
 		case <-ctx.Done():
+			log.Debugf("runIdle gracefully shutdown on cancelled context")
 			return
 		case idleST = <-ms.idleST:
 		case idleRT = <-ms.idleRT:
+		case <-time.After(time.Second * 5):
+			timer = true
 		}
 		if idleST && idleRT {
-			ms.checkIdle("ST & RT", time.Millisecond*10)
+			if timer {
+				// continue broadcast idle situation every 1 second
+				ms.checkIdle("ST & RT (timer)")
+			} else {
+				ms.checkIdle("ST & RT")
+			}
 		} else {
 			ClearSignal(ms.idle)
 		}
@@ -54,10 +63,10 @@ func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId st
 		return nil, err
 	}
 	ch := make(chan bson.Raw, 1) // need buffered for unit tests
-	ms.routines.Add(1)
+	ms.routines.Add(1)           // getOplog
 	// provide oplogST entries to the channel, closes channel upon exit
 	go func() {
-		defer ms.routines.Done()
+		defer ms.routines.Done() // getOplog
 		for {
 			next := changeStream.TryNext(ctx)
 			if !next && ctx.Err() == nil {
@@ -76,15 +85,15 @@ func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId st
 			}
 			err = ctx.Err()
 			if errors.Is(err, context.Canceled) {
-				log.Info("Process oplogST gracefully shutdown")
+				log.Info("Process oplog gracefully shutdown")
 				return
 			} else if err != nil {
-				log.Errorf("shutdown oplogST : can't get next oplogST entry %s", err)
+				log.Errorf("shutdown oplog : can't get next oplogST entry %s", err)
 				return
 			}
 			err := changeStream.Err()
 			if err != nil {
-				log.Errorf("failed to get oplogST entry: %s", err)
+				log.Errorf("failed to get oplog entry: %s", err)
 				continue
 			}
 		}
@@ -188,11 +197,12 @@ func (ms *MongoSync) initSTOplog(ctx context.Context) error {
 // it calls getCollChan to redirects oplog to channel for an ST collection.
 // If SyncId for the collection is greater than current syncId - it skips op
 func (ms *MongoSync) runSToplog(ctx context.Context) {
-	defer ms.routines.Done()
+	defer ms.routines.Done() // runSToplog
 	// loop until context tells we are done
 	started := make(map[string]string)
 	for op := range ms.oplogST {
 		if ctx.Err() != nil {
+			log.Debugf("runSToplog gracefully shutdown on cancelled context")
 			return
 		}
 		collName := getCollName(op)
@@ -234,9 +244,11 @@ func (ms *MongoSync) initRToplog(ctx context.Context) (err error) {
 // it calls getCollChan func to create that channel.
 // Then it redirects oplogRT op to that channel.
 func (ms *MongoSync) runRToplog(ctx context.Context) {
+	defer ms.routines.Done() // runRToplog
 	for op := range ms.oplogRT {
 		// update lastSyncId
 		if ctx.Err() != nil {
+			log.Debugf("runRToplog gracefully shutdown on cancelled context")
 			return
 		}
 		collName := getCollName(op)

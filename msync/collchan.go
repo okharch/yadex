@@ -131,7 +131,7 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 
 // flush sends "flush" signal to all the channels having dirty buffer
 func (ms *MongoSync) runFlush(ctx context.Context) {
-	defer ms.routines.Done()
+	defer ms.routines.Done() // runFlush
 	for range ms.flush {
 		ms.collBuffersMutex.RLock()
 		collChans := make([]chan<- bson.Raw, len(ms.collBuffers))
@@ -148,4 +148,5 @@ func (ms *MongoSync) runFlush(ctx context.Context) {
 			collChan <- nil // flush
 		}
 	}
+	log.Debugf("runFlush gracefully shutdown on closed channel")
 }

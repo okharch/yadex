@@ -31,9 +31,10 @@ type BWLog struct {
 }
 
 func (ms *MongoSync) showSpeed(ctx context.Context) {
-	defer ms.routines.Done()
+	defer ms.routines.Done() // showSpeed
 	for range time.Tick(time.Second) {
 		if ctx.Err() != nil {
+			log.Debugf("gracefully shutdown showSpeed on cancelled context")
 			return
 		}
 		if ms.getPendingBuffers() > 0 {
@@ -43,8 +44,9 @@ func (ms *MongoSync) showSpeed(ctx context.Context) {
 }
 
 func (ms *MongoSync) closeOnCtxDone(ctx context.Context) {
-	defer ms.routines.Done()
+	defer ms.routines.Done() // closeOnCtxDone
 	<-ctx.Done()
+	log.Debugf("closing channels on cancelled context")
 	close(ms.oplogST)
 	close(ms.oplogRT)
 	close(ms.bulkWriteST)
@@ -56,12 +58,13 @@ func (ms *MongoSync) closeOnCtxDone(ctx context.Context) {
 }
 
 func (ms *MongoSync) runRTBulkWrite(ctx context.Context) {
-	defer ms.routines.Done()
+	defer ms.routines.Done() // runRTBulkWrite
 	const ConcurrentWrites = 3
 	rtWrites := make(chan struct{}, ConcurrentWrites)
 	log.Trace("runRTBulkWrite")
 	for bwOp := range ms.bulkWriteRT {
 		if ctx.Err() != nil {
+			log.Debugf("runRTBulkWrite:gracefully shutdown on cancelled context")
 			return
 		}
 		if bwOp.Expires.Before(time.Now()) {
@@ -69,8 +72,9 @@ func (ms *MongoSync) runRTBulkWrite(ctx context.Context) {
 			ms.addBulkWrite(-bwOp.TotalBytes)
 			continue
 		}
-		ms.wgRT.Add(1)
+		ms.countBulkWriteRT.Add(1)
 		go func(bwOp *BulkWriteOp) {
+			defer ms.countBulkWriteRT.Done()
 			bwOp.Lock.Lock()
 			rtWrites <- struct{}{} // take write capacity, blocks if channel is full
 			// as it might take time to acquire lock and write capacity, let's check expiration again before going write
@@ -83,7 +87,6 @@ func (ms *MongoSync) runRTBulkWrite(ctx context.Context) {
 			ms.addBulkWrite(-bwOp.TotalBytes)
 			<-rtWrites // return write capacity by popping value from channel
 			bwOp.Lock.Unlock()
-			ms.wgRT.Done()
 		}(bwOp)
 	}
 }
@@ -92,12 +95,13 @@ func (ms *MongoSync) runRTBulkWrite(ctx context.Context) {
 func (ms *MongoSync) runSTBulkWrite(ctx context.Context) {
 	log.Trace("runSTBulkWrite")
 	for bwOp := range ms.bulkWriteST {
-		log.Tracef("runSTBulkWrite:wgRT.Wait() %s %d", bwOp.Coll, bwOp.TotalBytes)
-		ms.wgRT.Wait()
+		log.Tracef("runSTBulkWrite:countBulkWriteRT.Wait() %s %d", bwOp.Coll, bwOp.TotalBytes)
+		ms.countBulkWriteRT.Wait()
 		ms.BulkWriteOp(ctx, bwOp)
 		ms.addBulkWrite(-bwOp.TotalBytes)
 	}
-	ms.routines.Done()
+	log.Debugf("runSTBulkWrite gracefully shutdown on closed channel")
+	ms.routines.Done() // runSTBulkWrite
 }
 
 // putBwOp puts BulkWriteOp to either bulkWriteRT or bulkWriteST channel for BulkWrite operations.

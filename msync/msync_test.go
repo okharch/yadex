@@ -59,9 +59,7 @@ func TestSync(t *testing.T) {
 	// drop sync bookmarks, can be evil over time
 	require.NoError(t, err)
 	require.NotNil(t, ms)
-	require.NoError(t, err)
-	err = ms.syncId.Drop(ctx)
-	require.Nil(t, err)
+	require.NoError(t, ms.syncId.Drop(ctx))
 	const collName = "test"
 	// start syncing
 	started := time.Now()
@@ -108,4 +106,48 @@ func TestSync(t *testing.T) {
 	duration := time.Since(started)
 	log.Infof("Transferred %d bytes in %v, avg speed %s b/s", ms.totalBulkWrite, duration,
 		utils.IntCommaB(ms.totalBulkWrite*int(time.Second)/int(duration)))
+}
+
+func (ms *MongoSync) RunUntilIdle(ctx context.Context, f func()) {
+	cCtx, cCancel := context.WithCancel(ctx)
+	done := make(chan struct{}, 1)
+	go func() {
+		ms.runSync(cCtx)
+		done <- struct{}{}
+	}()
+	//ms.idleST <- false // reset idle to false
+	log.Tracef("before execution")
+	time.Sleep(time.Second)
+	if f != nil {
+		f()
+	}
+	log.Tracef("wait after execution")
+	<-ms.idle
+	cCancel()
+	<-done
+}
+
+func TestCollSync2(t *testing.T) {
+	// 1. create some TestXX tables
+	// 2. run sync
+	// 3. check whether they were copied
+	// 4. make some changes to TestXX and create TestNewXX
+	// 5. Run Sync.
+	// 6. Make sure everything synced
+	// ----------------
+	// make msync object and use tab
+	config.SetLogger(log.TraceLevel)
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+	ms, err := NewMongoSync(ctx, ExchCfg)
+	// drop sync bookmarks, can be evil over time
+	require.NoError(t, err)
+	require.NotNil(t, ms)
+	require.NoError(t, ms.syncId.Drop(ctx))
+	coll := ms.Sender.Collection("test")
+	require.NoError(t, coll.Drop(ctx))
+	ir, err := coll.InsertMany(ctx, CreateDocs(1, 100))
+	require.NoError(t, err)
+	require.Equal(t, 100, len(ir.InsertedIDs))
+	ms.RunUntilIdle(ctx, nil)
 }

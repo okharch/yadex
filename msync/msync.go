@@ -54,7 +54,7 @@ type MongoSync struct {
 	collMatch CollMatch                  // config, realtime nil and false if not found
 	collChan  map[string]chan<- bson.Raw // any collection has it's dedicated channel with dedicated goroutine.
 	// checkIdle facility, see checkIdle.go
-	wgRT             sync.WaitGroup // this is used to prevent ST BulkWrites clash over RT line
+	countBulkWriteRT sync.WaitGroup // this is used to prevent ST BulkWrites clash over RT line
 	collBuffers      map[string]int // collName=>collBytes stores how many bytes pending in a collection buffer
 	pendingBuffers   int            // pending bytes in collection's buffers
 	collBuffersMutex sync.RWMutex
@@ -111,6 +111,7 @@ func (ms *MongoSync) Run(ctx context.Context) {
 	receiverAvail := false
 	oldAvail := false
 	exCtx, exCancel := context.WithCancel(ctx)
+	var rsyncWG sync.WaitGroup
 	// this loop watches over parent context and exchange's connections available
 	// if they are not, it cancels exCtx so derived channels could be closed and synchronization stopped
 	for {
@@ -147,11 +148,12 @@ func (ms *MongoSync) Run(ctx context.Context) {
 			if exAvail {
 				log.Infof("running exchange %s...", ms.Name())
 				log.Infof("Connection available, start syncing of %s again...", ms.Name())
+				rsyncWG.Add(1)
 				go ms.runSync(exCtx)
 			} else {
 				log.Warnf("Exchange unavailable, stopping %s... ", ms.Name())
 				exCancel()
-				ms.routines.Wait()
+				rsyncWG.Wait()
 				exCtx, exCancel = context.WithCancel(ctx)
 			}
 			oldAvail = exAvail
@@ -185,7 +187,10 @@ func (ms *MongoSync) runSync(ctx context.Context) {
 	go ms.runSToplog(ctx)
 	go ms.runIdle(ctx)
 	go ms.SyncCollections(ctx)
+	log.Tracef("runSync running servers")
 	ms.routines.Wait()
+	ms.countBulkWriteRT.Wait()
+	log.Tracef("runSync shutdown")
 }
 
 func (ms *MongoSync) Name() string {
