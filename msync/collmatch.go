@@ -75,9 +75,9 @@ nextMatch:
 
 type CollMatch func(coll string) (config *config.DataSync, realtime bool)
 
-// GetCollMatch returns CollMatch func which returns Delay, Batch, realtime params for the collection
+// GetCollMatch returns CollMatch func which returns config and realtime params for the collection
 // it's behaviour is defined by configuration
-// if it can't find an entry matched for the collection it returns Delay equal -1
+// if it can't find an entry matched for the collection it returns config == nil, realtime == false
 func GetCollMatch(c *config.ExchangeConfig) CollMatch {
 	// compile all regexp for RT
 	rt := compileRegexps(c.RT)
