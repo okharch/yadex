@@ -2,6 +2,7 @@ package mongosync
 
 import (
 	log "github.com/sirupsen/logrus"
+	"go.mongodb.org/mongo-driver/bson"
 	"time"
 )
 
@@ -10,8 +11,8 @@ import (
 // and all the pending buffers with updates have been flushed.
 
 func (ms *MongoSync) getPendingBulkWrite() int {
-	ms.bulkWriteMutex.RLock()
-	defer ms.bulkWriteMutex.RUnlock()
+	ms.RLock()
+	defer ms.RUnlock()
 	return ms.pendingBulkWrite
 }
 
@@ -57,8 +58,8 @@ func (ms *MongoSync) setCollUpdateTotal(coll string, total int) {
 
 // getPendingBuffers returns total of bulkwrite buffers pending at coll's channels
 func (ms *MongoSync) getPendingBuffers() int {
-	ms.collBuffersMutex.RLock()
-	defer ms.collBuffersMutex.RUnlock()
+	ms.RLock()
+	defer ms.RUnlock()
 	return ms.pendingBuffers
 }
 
@@ -77,20 +78,29 @@ func (ms *MongoSync) WaitIdle(timeout time.Duration) {
 }
 
 func (ms *MongoSync) checkIdle(reason string) {
-	pendingBulkWrite := ms.getPendingBulkWrite()
-	if pendingBulkWrite == 0 {
-		pendingBuffers := ms.getPendingBuffers()
-		if pendingBuffers == 0 {
-			handled := Signal(ms.idle)
-			log.Tracef("checkIdle:%s:Sent IDLE signal, handled: %v", reason, handled)
-		} else {
-			ClearSignal(ms.idle)
-			handled := Signal(ms.flush)
-			log.Tracef("checkIdle:%s:Sent FLUSH signal (%d pending), handled: %v", reason, pendingBuffers, handled)
+	ms.Lock()
+	if ms.pendingBulkWrite == 0 && ms.pendingBuffers == 0 {
+		// close channels, clear collChan
+		log.Tracef("checkIdle: closing all colls channels...")
+		for _, ch := range ms.collChan {
+			close(ch)
 		}
+		// reset collChan map, no need to lock, it is
+		ms.collChan = make(map[string]chan<- bson.Raw)
+		ms.Unlock()
+		handled := Signal(ms.idle)
+		log.Tracef("checkIdle:%s:Sent IDLE signal, handled: %v", reason, handled)
+		return
+	}
+	ms.Unlock()
+	if ms.getPendingBulkWrite() == 0 {
+		pendingBuffers := ms.getPendingBuffers()
+		ClearSignal(ms.idle)
+		handled := Signal(ms.flush)
+		log.Tracef("checkIdle:%s:Sent FLUSH signal (%d pending), handled: %v", reason, pendingBuffers, handled)
 	} else {
 		ClearSignal(ms.idle)
-		log.Tracef("checkIdle:%s: pending pending bw %d: no signals", reason, pendingBulkWrite)
+		log.Tracef("checkIdle:%s: pendingBulkWrite %d: no signals", reason, ms.pendingBulkWrite)
 	}
 }
 

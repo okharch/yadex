@@ -14,7 +14,16 @@ import (
 // getCollChan returns channel of Oplog for the collection.
 // it launches goroutine which pops operation from that channel and flushes BulkWriteOp using putBWOp func
 func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *config.DataSync, realtime bool) chan<- bson.Raw {
-	in := make(chan bson.Raw, 2) // non-blocking, otherwise setCollUpdateTotal might deadlock
+	ms.RLock()
+	sendCh, ok := ms.collChan[collName]
+	ms.RUnlock()
+	if ok {
+		return sendCh
+	}
+	ch := make(chan bson.Raw)
+	ms.Lock()
+	ms.collChan[collName] = ch
+	ms.Unlock()
 	var bwLock sync.Mutex
 	// buffer for BulkWrite
 	minFlushDelay, maxFlushDelay, maxBatch := config.MinDelay, config.Delay, config.Batch
@@ -62,13 +71,7 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 	// process channel of Oplog, collects similar operation to batches, flushing them to bulkWriteChan
 	go func() { // oplogST for collection
 		defer ftCancel()
-		for { // oplogST can be buffered, so w
-			var op bson.Raw
-			select {
-			case <-ctx.Done():
-				return
-			case op = <-in:
-			}
+		for op := range ch {
 			if op == nil {
 				// this is from timer (go <-time.After(maxFlushDelay))
 				// or from flush
@@ -116,14 +119,14 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 					case <-time.After(time.Millisecond * time.Duration(maxFlushDelay)):
 						ftCancel()
 						log.Tracef("coll %s flush on timer %d ms", collName, maxFlushDelay)
-						in <- nil // flush() without lock
+						ch <- nil // flush() without lock
 					}
 				}()
 			}
 		}
 	}()
 
-	return in
+	return ch
 }
 
 // flush sends "flush" signal to all the channels having dirty buffer
