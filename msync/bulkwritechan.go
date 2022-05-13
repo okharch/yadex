@@ -30,28 +30,6 @@ type BWLog struct {
 	bytes    int
 }
 
-// initSync creates bulkWriteRT and bulkWriteST chan *BulkWriteOp  used to add bulkWrite operation to buffered channel
-// also it initializes collection CollSyncId to update sync progress
-// bwPut channel is used for signalling there is pending BulkWrite op
-// it launches serveBWChan goroutine which serves  operation from those channel and
-func (ms *MongoSync) initSync(_ context.Context) {
-	// each collection has separate channel for receiving its events.
-	// that channel is served by dedicated goroutine
-	ms.collChan = make(map[string]chan<- bson.Raw, 128)
-	//
-	ms.collBuffers = make(map[string]int)
-	// get name of bookmarkColSyncid on sender
-	log.Tracef("initSync")
-	// init channels before serving routines
-	ms.bulkWriteST = make(chan *BulkWriteOp)
-	ms.bulkWriteRT = make(chan *BulkWriteOp)
-	ms.idleST = make(chan bool)
-	ms.idleRT = make(chan bool)
-	// signalling channels
-	ms.flush = make(chan struct{})
-	ms.idle = make(chan struct{})
-}
-
 func (ms *MongoSync) showSpeed(ctx context.Context) {
 	defer ms.routines.Done()
 	for range time.Tick(time.Second) {
@@ -184,7 +162,7 @@ func (ms *MongoSync) BulkWriteOp(ctx context.Context, bwOp *BulkWriteOp) {
 		updated := bson.E{Key: "updated", Value: primitive.NewDateTimeFromTime(time.Now())}
 		filter := bson.D{id}
 		doc := bson.D{id, syncId, updated}
-		if r, err := ms.CollSyncId.ReplaceOne(ctx, filter, doc, optUpsert); err != nil {
+		if r, err := ms.syncId.ReplaceOne(ctx, filter, doc, optUpsert); err != nil {
 			log.Warnf("failed to update sync_id for collAtReceiver %s: %s", bwOp.Coll, err)
 		} else {
 			log.Tracef("Coll found(updated) %d(%d) %s.sync_id %s", r.MatchedCount, r.UpsertedCount+r.ModifiedCount, bwOp.Coll,
