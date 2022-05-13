@@ -34,7 +34,7 @@ func (ms *MongoSync) showSpeed(ctx context.Context) {
 	defer ms.routines.Done() // showSpeed
 	for range time.Tick(time.Second) {
 		if ctx.Err() != nil {
-			log.Debugf("gracefully shutdown showSpeed on cancelled context")
+			log.Debug("gracefully shutdown showSpeed on cancelled context")
 			return
 		}
 		if ms.getPendingBuffers() > 0 {
@@ -64,7 +64,7 @@ func (ms *MongoSync) runRTBulkWrite(ctx context.Context) {
 	log.Trace("runRTBulkWrite")
 	for bwOp := range ms.bulkWriteRT {
 		if ctx.Err() != nil {
-			log.Debugf("runRTBulkWrite:gracefully shutdown on cancelled context")
+			log.Debug("runRTBulkWrite:gracefully shutdown on cancelled context")
 			return
 		}
 		if bwOp.Expires.Before(time.Now()) {
@@ -100,7 +100,7 @@ func (ms *MongoSync) runSTBulkWrite(ctx context.Context) {
 		ms.BulkWriteOp(ctx, bwOp)
 		ms.addBulkWrite(-bwOp.TotalBytes)
 	}
-	log.Debugf("runSTBulkWrite gracefully shutdown on closed channel")
+	log.Debug("runSTBulkWrite gracefully shutdown on closed channel")
 	ms.routines.Done() // runSTBulkWrite
 }
 

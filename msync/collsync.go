@@ -95,7 +95,7 @@ func (ms *MongoSync) SyncCollections(ctx context.Context) {
 	}
 	for _, coll := range colls {
 		if ctx.Err() != nil {
-			log.Debugf("SyncCollections gracefully shutdown on cancelled context")
+			log.Debug("SyncCollections gracefully shutdown on cancelled context")
 			return
 		}
 		config, rt := ms.collMatch(coll)

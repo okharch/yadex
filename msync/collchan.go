@@ -148,5 +148,5 @@ func (ms *MongoSync) runFlush(ctx context.Context) {
 			collChan <- nil // flush
 		}
 	}
-	log.Debugf("runFlush gracefully shutdown on closed channel")
+	log.Debug("runFlush gracefully shutdown on closed channel")
 }

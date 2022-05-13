@@ -36,7 +36,7 @@ func (ms *MongoSync) runIdle(ctx context.Context) {
 		timer := false
 		select {
 		case <-ctx.Done():
-			log.Debugf("runIdle gracefully shutdown on cancelled context")
+			log.Debug("runIdle gracefully shutdown on cancelled context")
 			return
 		case idleST = <-ms.idleST:
 		case idleRT = <-ms.idleRT:
@@ -202,7 +202,7 @@ func (ms *MongoSync) runSToplog(ctx context.Context) {
 	started := make(map[string]string)
 	for op := range ms.oplogST {
 		if ctx.Err() != nil {
-			log.Debugf("runSToplog gracefully shutdown on cancelled context")
+			log.Debug("runSToplog gracefully shutdown on cancelled context")
 			return
 		}
 		collName := getCollName(op)
@@ -248,7 +248,7 @@ func (ms *MongoSync) runRToplog(ctx context.Context) {
 	for op := range ms.oplogRT {
 		// update lastSyncId
 		if ctx.Err() != nil {
-			log.Debugf("runRToplog gracefully shutdown on cancelled context")
+			log.Debug("runRToplog gracefully shutdown on cancelled context")
 			return
 		}
 		collName := getCollName(op)
