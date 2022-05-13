@@ -60,7 +60,7 @@ func TestSync(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, ms)
 	require.NoError(t, err)
-	err = ms.CollSyncId.Drop(ctx)
+	err = ms.syncId.Drop(ctx)
 	require.Nil(t, err)
 	const collName = "test"
 	// start syncing

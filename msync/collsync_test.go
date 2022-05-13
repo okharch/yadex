@@ -6,7 +6,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson"
 	"testing"
-	"time"
 	"yadex/config"
 )
 
@@ -52,15 +51,15 @@ func TestSyncCollection(t *testing.T) {
 	res, err := coll.InsertMany(ctx, CreateDocs(1, numDocs))
 	require.NoError(t, err)
 	require.Equal(t, numDocs, int64(len(res.InsertedIDs)))
-	ms.initSync(ctx)
-	lastSyncId, err := getLastSyncId(ctx, ms.Sender)
+	err = ms.initSync(ctx)
 	require.NoError(t, err)
+	ms.routines.Add(1)
+	go ms.runSTBulkWrite(ctx)
 	// run syncCollection to transfer coll from sender to receiver
-	err = ms.syncCollection(ctx, "test", 1024*128, lastSyncId)
+	err = ms.syncCollection(ctx, "test", 1024*128)
+	close(ms.bulkWriteST)
 	require.NoError(t, err)
-	log.Debug("WaitIdle")
-	// wait until data transferred through BulkWrite channel
-	ms.WaitIdle(time.Second)
+	ms.routines.Wait()
 	// now check what we have received at the receiver
 	count, err := ms.Receiver.Collection(collName).CountDocuments(ctx, bson.M{"_id": bson.M{"$in": res.InsertedIDs}})
 	require.NoError(t, err)
@@ -77,6 +76,7 @@ func TestSyncCollection(t *testing.T) {
 func TestSyncCollectionMultiple(t *testing.T) {
 	config.SetLogger(log.InfoLevel)
 	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
 	ms, err := NewMongoSync(ctx, ExchCfg)
 	require.NoError(t, err)
 	require.NotNil(t, ms)
@@ -91,25 +91,22 @@ func TestSyncCollectionMultiple(t *testing.T) {
 	err = receiverColl.Drop(ctx)
 	require.NoError(t, err)
 
-	ms.initSync(ctx)
 	for i := int64(0); i <= 3; i++ {
 		// insert another 1000
 		res, err := coll.InsertMany(ctx, CreateDocs(numDocs*i+1, numDocs))
 		require.NoError(t, err)
 		require.Equal(t, numDocs, int64(len(res.InsertedIDs)))
-		lastSyncId, err := getLastSyncId(ctx, ms.Sender)
+		err = ms.initSync(ctx)
 		require.NoError(t, err)
-		err = ms.syncCollection(ctx, "test", 217, lastSyncId)
+		ms.routines.Add(1)
+		go ms.runSTBulkWrite(ctx)
+		err = ms.syncCollection(ctx, "test", 217)
 		require.NoError(t, err)
-		// wait until data transferred through BulkWrite channel
-		ms.WaitIdle(time.Second)
+		close(ms.bulkWriteST)
+		ms.routines.Wait()
 		// check all records inserted
 		c, err := receiverColl.CountDocuments(ctx, bson.D{})
 		require.NoError(t, err)
 		require.Equal(t, numDocs*(i+1), c)
 	}
-
-	cancel()
-	log.Info("waitSync.Wait()")
-	ms.routines.Wait()
 }

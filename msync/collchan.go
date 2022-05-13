@@ -48,14 +48,12 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 			}
 		}
 		ftCancel()
-		var syncId string
-		if !realtime {
-			syncId = getSyncId(lastOp)
-		}
-		bwOp := &BulkWriteOp{Coll: collName, RealTime: realtime, OpType: lastOpType, SyncId: syncId}
+		bwOp := &BulkWriteOp{Coll: collName, RealTime: realtime, OpType: lastOpType}
 		if realtime {
 			bwOp.Lock = &bwLock
 			bwOp.Expires = time.Now().Add(time.Duration(config.Expires) * time.Millisecond)
+		} else {
+			bwOp.SyncId = getSyncId(lastOp)
 		}
 		if lastOpType != OpLogDrop {
 			bwOp.Models = models

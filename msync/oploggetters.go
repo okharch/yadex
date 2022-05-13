@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// getColl extracts collection's name from op(log)
-func getColl(op bson.Raw) string {
+// getCollName extracts collection's name from op(log)
+func getCollName(op bson.Raw) string {
 	return op.Lookup("ns", "coll").StringValue()
 }
 
