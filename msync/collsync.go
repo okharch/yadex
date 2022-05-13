@@ -30,17 +30,18 @@ func fetchIds(ctx context.Context, coll *mongo.Collection) []interface{} {
 
 // syncCollection
 // insert all the docs from sender but those which _ids found at receiver
-func (ms *MongoSync) syncCollection(ctx context.Context, collName string, maxBulkCount int) error {
+func (ms *MongoSync) syncCollection(ctx context.Context, collName string, maxBulkCount int, syncId string) error {
 	log.Infof("cloning collection %s...", collName)
+	ms.Lock()
+	ms.collSyncId[collName] = syncId
+	ms.Unlock()
 	models := make([]mongo.WriteModel, maxBulkCount)
 	count := 0
-	var syncId string
 	flush := func() {
 		if count == 0 {
 			return
 		}
 		log.Tracef("syncCollection flushing %d records", len(models))
-		syncId = ms.getLastSyncId()
 		ms.putBwOp(&BulkWriteOp{
 			Coll:   collName,
 			OpType: OpLogUnordered,
@@ -74,15 +75,12 @@ func (ms *MongoSync) syncCollection(ctx context.Context, collName string, maxBul
 	}
 	flush()
 	log.Infof("sync of %s completed", collName)
-	ms.Lock()
-	ms.collSyncId[collName] = syncId
-	ms.Unlock()
 	return ctx.Err()
 }
 
-// SyncCollections checks for all collections from database
-// whether they should be synced at all using delay != -1 flag
-// Then before calling syncCollection for a collection it remembers last SyncId,
+// SyncCollections checks for all ST collections from database
+// whether they should be synced at all
+// Before calling syncCollection for a collection it remembers last SyncId,
 // so it can start dealing with oplogST starting with that Id
 // it returns nil if it was able to clone all the collections
 // successfully into chBulkWriteOps channels
@@ -101,11 +99,9 @@ func (ms *MongoSync) SyncCollections(ctx context.Context) {
 		}
 		// we copy only ST collections which do not have a bookmark in collSyncId
 		if _, ok := ms.collSyncId[coll]; !ok {
-			if err != nil {
-				log.Errorf("Can't fetch SyncId to start replication after collection %s clone: %s: make sure oplog is on", coll, err)
-				return // this is fatal
-			}
-			if err := ms.syncCollection(ctx, coll, config.Batch); err != nil {
+			log.Infof("no SyncId for coll %s found, it will be synced before following oplog", coll)
+			syncId := ms.getLastSyncId()
+			if err := ms.syncCollection(ctx, coll, config.Batch, syncId); err != nil {
 				log.Errorf("sync collection %s for the exchange %s failed: %s", coll, ms.Name(), err)
 			}
 		}

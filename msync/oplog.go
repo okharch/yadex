@@ -28,7 +28,10 @@ func getChangeStream(ctx context.Context, sender *mongo.Database, syncId string)
 }
 func (ms *MongoSync) runIdle(ctx context.Context) {
 	defer ms.routines.Done()
-	var idleST, idleRT bool
+	idleST, idleRT := true, true
+	if ms.idleST == nil || ms.idleRT == nil {
+		log.Fatal("idle channels not initialized")
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -37,34 +40,38 @@ func (ms *MongoSync) runIdle(ctx context.Context) {
 		case idleRT = <-ms.idleRT:
 		}
 		if idleST && idleRT {
-			ms.checkIdle("ST & RT")
+			ms.checkIdle("ST & RT", time.Millisecond*10)
 		} else {
 			ClearSignal(ms.idle)
 		}
 	}
 }
 
-func (ms *MongoSync) GetDbOpLog(ctx context.Context, db *mongo.Database, syncId string, idle chan bool) (Oplog, error) {
+// getOplog creates channel providing oplog ops. It triggers(true) idle channel when there is not pending ops in the oplog
+func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId string, idle chan bool) (Oplog, error) {
 	changeStream, err := getChangeStream(ctx, db, syncId)
 	if err != nil {
 		return nil, err
 	}
-	ch := make(chan bson.Raw, 128)
+	ch := make(chan bson.Raw, 1) // need buffered for unit tests
 	ms.routines.Add(1)
 	// provide oplogST entries to the channel, closes channel upon exit
 	go func() {
-		ms.routines.Done()
-		defer close(ch)
+		defer ms.routines.Done()
 		for {
 			next := changeStream.TryNext(ctx)
 			if !next && ctx.Err() == nil {
-				log.Infof("GetDbOpLog: no pending oplog. pending buf %d pending bulkWrite %d", ms.getPendingBuffers(),
-					ms.getPendingBulkWrite())
+				log.Infof("getOplog: no pending oplog. pending buf %d pending bulkWrite %d, exchange: %s", ms.getPendingBuffers(),
+					ms.getPendingBulkWrite(), ms.Name())
 				idle <- true
+				//log.Infof("getOplog: next")
 				next = changeStream.Next(ctx)
 			}
 			if next {
+				//op := changeStream.Current
+				//log.Infof("<- oplog %s %s", getCollName(op), getSyncId(op))
 				ch <- changeStream.Current
+				//log.Infof("flushed oplog %s %s", getCollName(op), getSyncId(op))
 				continue
 			}
 			err = ctx.Err()
@@ -158,7 +165,7 @@ func (ms *MongoSync) initSTOplog(ctx context.Context) error {
 	}
 	for _, b := range csBookmarks {
 		if oplog == nil {
-			oplog, err = ms.GetDbOpLog(ctx, ms.Sender, b.SyncId, ms.idleST)
+			oplog, err = ms.getOplog(ctx, ms.Sender, b.SyncId, ms.idleST)
 			if oplog != nil {
 				log.Debugf("sync was resumed from (%s) %s", b.CollName, b.SyncId)
 			}
@@ -171,41 +178,45 @@ func (ms *MongoSync) initSTOplog(ctx context.Context) error {
 		}
 	}
 	if oplog == nil { // give up on resume, start from current state after cloning collections
-		oplog, err = ms.GetDbOpLog(ctx, ms.Sender, "", ms.idleST)
+		oplog, err = ms.getOplog(ctx, ms.Sender, "", ms.idleST)
 	}
 	ms.oplogST = oplog
 	return err
 }
 
 // runSToplog handles incoming oplogST entries from oplogST channel.
-// It finds out which collection that oplogST record belongs.
-// If a channel for handling that collection has not been created,
-// it calls getCollChan func to create that channel.
-// Then it redirects oplogST entry to that channel.
-// If SyncId for that oplogST is equal or greater than syncId for the collection
+// it calls getCollChan to redirects oplog to channel for an ST collection.
+// If SyncId for the collection is greater than current syncId - it skips op
 func (ms *MongoSync) runSToplog(ctx context.Context) {
 	defer ms.routines.Done()
 	// loop until context tells we are done
+	started := make(map[string]string)
 	for op := range ms.oplogST {
 		if ctx.Err() != nil {
 			return
 		}
 		collName := getCollName(op)
-		// check if it is synced
+		// check if it is subject to sync
 		config, rt := ms.collMatch(collName)
-		if config == nil || rt {
+		if rt || config == nil {
 			continue // ignore unknown and RT collection
 		}
 		// check whether we reached syncId to start collection sync
-		syncId := getSyncId(op)
-		if startFrom, ok := ms.collSyncId[collName]; ok && syncId < startFrom {
+		ms.RLock()
+		startFrom, ok := ms.collSyncId[collName]
+		ms.RUnlock()
+		if !ok || getSyncId(op) < startFrom {
 			// ignore operation while current sync_id is less than collection's one
 			continue
 		}
-		log.Debugf("start follow coll %s from %s", collName, ms.lastSyncId)
-		// now establish handling channel for that collection so the next op can be handled
-		// now get handling channel for that collection and direct op to that channel
+		if _, ok := started[collName]; !ok {
+			syncId := getSyncId(op)
+			started[collName] = syncId
+			log.Infof("follow oplog for coll %s from %s, exchange %s", collName, syncId, ms.Name())
+		}
+		// no ST idling anymore
 		ms.idleST <- false
+		// now redirect handling of op to the channel for that collection
 		ch := ms.getCollChan(ctx, collName, config, rt)
 		ch <- op
 	}
@@ -213,7 +224,7 @@ func (ms *MongoSync) runSToplog(ctx context.Context) {
 
 // initRToplog just starts to follow changes from the current tail of the oplog
 func (ms *MongoSync) initRToplog(ctx context.Context) (err error) {
-	ms.oplogRT, err = ms.GetDbOpLog(ctx, ms.Sender, "", ms.idleRT)
+	ms.oplogRT, err = ms.getOplog(ctx, ms.Sender, "", ms.idleRT)
 	return err
 }
 
@@ -228,11 +239,11 @@ func (ms *MongoSync) runRToplog(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		ms.setLastSyncId(getSyncId(op))
 		collName := getCollName(op)
 		// check if it is synced
 		config, rt := ms.collMatch(collName)
 		if !rt {
+			ms.setLastSyncId(getSyncId(op))
 			continue
 		}
 		// now get handling channel for that collection and direct op to that channel

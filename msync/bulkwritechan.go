@@ -90,7 +90,6 @@ func (ms *MongoSync) runRTBulkWrite(ctx context.Context) {
 
 // runSTBulkWrite serves bulkWriteST channel, waits outputClear state before call ms.BulkWriteOp(ctx, bwOp)
 func (ms *MongoSync) runSTBulkWrite(ctx context.Context) {
-	defer ms.routines.Done()
 	log.Trace("runSTBulkWrite")
 	for bwOp := range ms.bulkWriteST {
 		log.Tracef("runSTBulkWrite:wgRT.Wait() %s %d", bwOp.Coll, bwOp.TotalBytes)
@@ -98,6 +97,7 @@ func (ms *MongoSync) runSTBulkWrite(ctx context.Context) {
 		ms.BulkWriteOp(ctx, bwOp)
 		ms.addBulkWrite(-bwOp.TotalBytes)
 	}
+	ms.routines.Done()
 }
 
 // putBwOp puts BulkWriteOp to either bulkWriteRT or bulkWriteST channel for BulkWrite operations.

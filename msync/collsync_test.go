@@ -56,16 +56,20 @@ func TestSyncCollection(t *testing.T) {
 	ms.routines.Add(1)
 	go ms.runSTBulkWrite(ctx)
 	// run syncCollection to transfer coll from sender to receiver
-	err = ms.syncCollection(ctx, "test", 1024*128)
-	close(ms.bulkWriteST)
+	err = ms.syncCollection(ctx, "test", 1024*128, "!")
 	require.NoError(t, err)
-	ms.routines.Wait()
+	close(ms.bulkWriteST)
+	ms.routines.Add(1)
+	go ms.runIdle(ctx)
+	<-ms.idle
+	require.Equal(t, "!", ms.collSyncId["test"])
 	// now check what we have received at the receiver
 	count, err := ms.Receiver.Collection(collName).CountDocuments(ctx, bson.M{"_id": bson.M{"$in": res.InsertedIDs}})
 	require.NoError(t, err)
 	require.Equal(t, numDocs, count)
 	// terminate ms sync
 	cancel()
+	//ms.routines.Wait()
 }
 
 // TestSyncCollection2Steps test
@@ -100,13 +104,20 @@ func TestSyncCollectionMultiple(t *testing.T) {
 		require.NoError(t, err)
 		ms.routines.Add(1)
 		go ms.runSTBulkWrite(ctx)
-		err = ms.syncCollection(ctx, "test", 217)
+		// run syncCollection to transfer coll from sender to receiver
+		err = ms.syncCollection(ctx, "test", 1024*128, "!")
 		require.NoError(t, err)
+		//close(ms.oplogST)
 		close(ms.bulkWriteST)
-		ms.routines.Wait()
+		ms.routines.Add(1)
+		go ms.runIdle(ctx)
+		<-ms.idle
+		require.Equal(t, "!", ms.collSyncId["test"])
 		// check all records inserted
 		c, err := receiverColl.CountDocuments(ctx, bson.D{})
 		require.NoError(t, err)
 		require.Equal(t, numDocs*(i+1), c)
 	}
+	cancel()
+	//ms.routines.Wait()
 }

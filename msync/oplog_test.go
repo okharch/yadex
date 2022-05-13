@@ -2,23 +2,36 @@ package mongosync
 
 import (
 	"context"
-	"errors"
+	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson"
+	"sync"
 	"testing"
 )
 
-func TestGetDbOpLog(t *testing.T) {
+func TestGetOplog(t *testing.T) {
 	ctx := context.TODO()
 	ms, err := NewMongoSync(ctx, ExchCfg)
+	ms.initChannels()
+	go ms.runIdle(ctx)
 	require.NoError(t, err)
 	require.NotNil(t, ms)
-	ms.initSync(ctx)
 	ctx, cancel := context.WithCancel(context.TODO())
-	opCh, err := ms.GetDbOpLog(ctx, ms.Sender, "", ms.idleST)
-	ir, err := ms.Sender.Collection("test").InsertOne(ctx, bson.D{{}})
+	log.Infof("getting oplog for %s", ms.Name())
+	opCh, err := ms.getOplog(ctx, ms.Sender, "", ms.idleRT)
+	var input sync.WaitGroup
+	input.Add(1)
+	var op bson.Raw
+	go func() {
+		log.Info("getting OpCh")
+		op = <-opCh
+		log.Infof("got OpCh %s %s", getCollName(op), getSyncId(op))
+		input.Done()
+	}()
+	log.Info("insert into test table")
+	ir, err := ms.Sender.Collection("test").InsertOne(ctx, bson.D{})
 	require.NoError(t, err)
-	op := <-opCh
+	input.Wait()
 	require.NotNil(t, op)
 	opType := op.Lookup("operationType")
 	require.NotNil(t, opType)
@@ -28,5 +41,5 @@ func TestGetDbOpLog(t *testing.T) {
 	oid := id.ObjectID()
 	require.Equal(t, ir.InsertedID, oid)
 	cancel()
-	require.True(t, errors.Is(ctx.Err(), context.Canceled))
+	//require.True(t, errors.Is(ctx.Err(), context.Canceled))
 }

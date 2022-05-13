@@ -40,18 +40,18 @@ type MongoSync struct {
 	bulkWriteRT, bulkWriteST chan *BulkWriteOp // channels for RT and ST BulkWrites
 	Config                   *config.ExchangeConfig
 	lastSyncId               string
-	collSyncId               map[string]string // map
+	collSyncId               map[string]string // which Id start/started collection syncing from
 	routines                 sync.WaitGroup    // housekeeping of runSync. it is zero on exit
 	// syncId collection to store sync progress bookmark for ST collections.
 	// When it starts sync session for an ST collection again it tries to resume syncing from that bookmark.
 	syncId *mongo.Collection
 	// need both idleST and idleRT channels to find out complete idle situation
 	// as we can idle in RT but not in ST and vice versa
-	idleST    chan bool // declare the idleST state for oplogST
-	idleRT    chan bool // declare the idleRT state for oplogRT
-	oplogST   Oplog     // follow ST changes
-	oplogRT   Oplog     // follow RT changes
-	collMatch CollMatch
+	idleST    chan bool                  // declare the idleST state for oplogST
+	idleRT    chan bool                  // declare the idleRT state for oplogRT
+	oplogST   Oplog                      // follow ST changes
+	oplogRT   Oplog                      // follow RT changes
+	collMatch CollMatch                  // config, realtime nil and false if not found
 	collChan  map[string]chan<- bson.Raw // any collection has it's dedicated channel with dedicated goroutine.
 	// checkIdle facility, see checkIdle.go
 	wgRT             sync.WaitGroup // this is used to prevent ST BulkWrites clash over RT line
@@ -93,7 +93,7 @@ func NewMongoSync(ctx context.Context, exchCfg *config.ExchangeConfig) (*MongoSy
 	}
 	ms.Receiver = ms.receiverClient.Database(ms.Config.ReceiverDB)
 	log.Infof("Sucessfully connected to receiver's DB at %s", ms.Config.ReceiverURI)
-	ms.collMatch = GetCollMatch(ms.Config) //
+	ms.collMatch = GetCollMatch(ms.Config) // config dependent, init by NewMongoSync
 	bookmarkColSyncIdName := strings.Join([]string{ms.Config.SenderURI, ms.Config.SenderDB, ms.Config.ReceiverURI, ms.Config.ReceiverDB},
 		"-")
 	reNotId := regexp.MustCompile("[^a-zA-Z0-9]+")
@@ -181,10 +181,10 @@ func (ms *MongoSync) runSync(ctx context.Context) {
 	// flush server
 	go ms.runFlush(ctx)
 	// start handling oplogST for syncing sender and receiver collections
-	go ms.runSToplog(ctx)
 	go ms.runRToplog(ctx)
-	go ms.SyncCollections(ctx)
+	go ms.runSToplog(ctx)
 	go ms.runIdle(ctx)
+	go ms.SyncCollections(ctx)
 	ms.routines.Wait()
 }
 
@@ -192,11 +192,7 @@ func (ms *MongoSync) Name() string {
 	return fmt.Sprintf("%s.%s => %s.%s", ms.Config.SenderURI, ms.Config.SenderDB, ms.Config.ReceiverURI, ms.Config.ReceiverDB)
 }
 
-// initSync creates bulkWriteRT and bulkWriteST chan *BulkWriteOp  used to add bulkWrite operation to buffered channel
-// also it initializes collection syncId to update sync progress
-// bwPut channel is used for signalling there is pending BulkWrite op
-// it launches serveBWChan goroutine which serves  operation from those channel and
-func (ms *MongoSync) initSync(ctx context.Context) error {
+func (ms *MongoSync) initChannels() {
 	// each collection has separate channel for receiving its events.
 	// that channel is served by dedicated goroutine
 	ms.collChan = make(map[string]chan<- bson.Raw)
@@ -207,12 +203,19 @@ func (ms *MongoSync) initSync(ctx context.Context) error {
 	// init channels before serving routines
 	ms.bulkWriteST = make(chan *BulkWriteOp)
 	ms.bulkWriteRT = make(chan *BulkWriteOp)
-	ms.idleST = make(chan bool)
+	ms.idleST = make(chan bool, 1) // need buffered for unit tests
 	ms.idleRT = make(chan bool, 1) // need buffered in order to init LastSyncId
 	// signalling channels
 	ms.flush = make(chan struct{})
 	ms.idle = make(chan struct{})
+}
 
+// initSync creates bulkWriteRT and bulkWriteST chan *BulkWriteOp  used to add bulkWrite operation to buffered channel
+// also it initializes collection syncId to update sync progress
+// bwPut channel is used for signalling there is pending BulkWrite op
+// it launches serveBWChan goroutine which serves  operation from those channel and
+func (ms *MongoSync) initSync(ctx context.Context) error {
+	ms.initChannels()
 	if err := ms.initRToplog(ctx); err != nil {
 		return fmt.Errorf("init oplogRT failed: %s", err)
 	}

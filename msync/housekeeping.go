@@ -25,6 +25,10 @@ func (ms *MongoSync) getBWSpeed() int {
 		totalDuration += bwLog.duration
 		totalBytes += bwLog.bytes
 	}
+	// avoid divide by zero
+	if totalDuration == 0 {
+		return 0
+	}
 	return totalBytes * int(time.Second) / int(totalDuration)
 }
 
@@ -77,7 +81,10 @@ func (ms *MongoSync) WaitIdle(timeout time.Duration) {
 	<-ms.idle
 }
 
-func (ms *MongoSync) checkIdle(reason string) {
+func (ms *MongoSync) checkIdle(reason string, timeout time.Duration) {
+	if timeout != 0 {
+		time.Sleep(timeout) // give chance to flush buffers
+	}
 	ms.Lock()
 	if ms.pendingBulkWrite == 0 && ms.pendingBuffers == 0 {
 		// close channels, clear collChan
@@ -89,7 +96,7 @@ func (ms *MongoSync) checkIdle(reason string) {
 		ms.collChan = make(map[string]chan<- bson.Raw)
 		ms.Unlock()
 		handled := Signal(ms.idle)
-		log.Tracef("checkIdle:%s:Sent IDLE signal, handled: %v", reason, handled)
+		log.Infof("checkIdle:%s:Sent IDLE signal, handled: %v", reason, handled)
 		return
 	}
 	ms.Unlock()
