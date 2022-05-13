@@ -88,6 +88,7 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 				models = nil
 				lastOp = op
 				lastOpType = opType
+				totalBytes = len(op)
 				// opLogDrop flushed immediately
 				log.Tracef("coll %s flush on opLogDrop", collName)
 				flush("opLogDrop")
@@ -96,15 +97,16 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 				log.Warnf("Operation of unknown type left unhandled:%+v", op)
 				continue
 			}
+			if totalBytes+len(op) >= maxBatch {
+				log.Tracef("coll %s flush on bulk size %d", collName, maxBatch)
+				flush(fmt.Sprintf("%d > maxBatch %d", totalBytes+len(op), maxBatch))
+			}
 			lastOpType = opType
 			lastOp = op
 			models = append(models, writeModel)
-			ms.setCollUpdateTotal(collName, totalBytes)
 			totalBytes += len(op)
-			if totalBytes >= maxBatch {
-				log.Tracef("coll %s flush on bulk size %d", collName, maxBatch)
-				flush(fmt.Sprintf("%d > maxBatch %d", totalBytes, maxBatch))
-			} else if len(models) == 1 {
+			ms.setCollUpdateTotal(collName, totalBytes)
+			if len(models) == 1 {
 				// we just put 1st item, set timer to flush after maxFlushDelay
 				// unless it is filled up to (max)maxBatch items
 				ftCancel()
