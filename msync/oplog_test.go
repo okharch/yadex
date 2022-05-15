@@ -11,14 +11,14 @@ import (
 
 func TestGetOplog(t *testing.T) {
 	ctx := context.TODO()
-	ms, err := NewMongoSync(ctx, ExchCfg)
-	ms.initChannels()
-	go ms.runIdle(ctx)
+	ready := make(chan bool, 1)
+	ms, err := NewMongoSync(ctx, ExchCfg, ready)
+	ms.runDirt()
 	require.NoError(t, err)
 	require.NotNil(t, ms)
 	ctx, cancel := context.WithCancel(context.TODO())
 	log.Infof("getting oplog for %s", ms.Name())
-	opCh, err := ms.getOplog(ctx, ms.Sender, "", ms.idleRT)
+	opCh, err := ms.getOplog(ctx, ms.Sender, "")
 	var input sync.WaitGroup
 	input.Add(1)
 	var op bson.Raw

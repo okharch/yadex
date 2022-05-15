@@ -37,24 +37,10 @@ func (ms *MongoSync) showSpeed(ctx context.Context) {
 			log.Debug("gracefully shutdown showSpeed on cancelled context")
 			return
 		}
-		if ms.getPendingBuffers() > 0 {
+		if ms.getCollUpdated() {
 			log.Tracef("BulkWriteOp: avg speed %s bytes/sec", utils.IntCommaB(ms.getBWSpeed()))
 		}
 	}
-}
-
-func (ms *MongoSync) closeOnCtxDone(ctx context.Context) {
-	defer ms.routines.Done() // closeOnCtxDone
-	<-ctx.Done()
-	log.Debugf("closing channels on cancelled context")
-	close(ms.oplogST)
-	close(ms.oplogRT)
-	close(ms.bulkWriteST)
-	close(ms.bulkWriteRT)
-	close(ms.idleST)
-	close(ms.idleRT)
-	close(ms.idle)
-	close(ms.flush)
 }
 
 func (ms *MongoSync) runRTBulkWrite(ctx context.Context) {
@@ -95,8 +81,9 @@ func (ms *MongoSync) runRTBulkWrite(ctx context.Context) {
 func (ms *MongoSync) runSTBulkWrite(ctx context.Context) {
 	log.Trace("runSTBulkWrite")
 	for bwOp := range ms.bulkWriteST {
-		log.Tracef("runSTBulkWrite:countBulkWriteRT.Wait() %s %d", bwOp.Coll, bwOp.TotalBytes)
+		started := time.Now()
 		ms.countBulkWriteRT.Wait()
+		log.Tracef("runSTBulkWrite:BulkWriteRT.Wait() %s %d %v", bwOp.Coll, bwOp.TotalBytes, time.Now().Sub(started))
 		ms.BulkWriteOp(ctx, bwOp)
 		ms.addBulkWrite(-bwOp.TotalBytes)
 	}
@@ -121,7 +108,7 @@ func (ms *MongoSync) BulkWriteOp(ctx context.Context, bwOp *BulkWriteOp) {
 	if ctx.Err() != nil {
 		return
 	}
-	log.Tracef("BulkWriteOp %s %d", bwOp.Coll, bwOp.TotalBytes)
+	log.Tracef("BulkWriteOp %s %d records %d", bwOp.Coll, len(bwOp.Models), bwOp.TotalBytes)
 	collAtReceiver := ms.Receiver.Collection(bwOp.Coll)
 	if bwOp.OpType == OpLogDrop {
 		log.Tracef("drop Receiver.%s", bwOp.Coll)
@@ -132,7 +119,6 @@ func (ms *MongoSync) BulkWriteOp(ctx context.Context, bwOp *BulkWriteOp) {
 	}
 	ordered := bwOp.OpType == OpLogOrdered
 	optOrdered := &options.BulkWriteOptions{Ordered: &ordered}
-	log.Tracef("BulkWriteOp %s %d records %d", bwOp.Coll, len(bwOp.Models), bwOp.TotalBytes)
 	// add bwRecord, calculate speed
 	start := time.Now()
 	r, err := collAtReceiver.BulkWrite(ctx, bwOp.Models, optOrdered)
@@ -173,4 +159,20 @@ func (ms *MongoSync) BulkWriteOp(ctx context.Context, bwOp *BulkWriteOp) {
 				bwOp.SyncId)
 		}
 	}
+}
+
+// addBulkWrite modifies pendingBulkWrite and totalBulkWrite
+// if it finds out there is no pendingBulkWrite it sends State false to ms.dirty
+func (ms *MongoSync) addBulkWrite(delta int) {
+	ms.bulkWriteMutex.Lock()
+	ms.pendingBulkWrite += delta
+	if delta > 0 {
+		ms.totalBulkWrite += delta
+	}
+	// here there is a chance we become clean, let runDirt find it out
+	if ms.pendingBulkWrite == 0 {
+		log.Trace("pendingBulkWrite=0, check dirt<-false")
+		ms.dirty <- false // BulkWrite buffers are clean
+	}
+	ms.bulkWriteMutex.Unlock()
 }

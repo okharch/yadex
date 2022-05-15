@@ -32,9 +32,6 @@ func fetchIds(ctx context.Context, coll *mongo.Collection) []interface{} {
 // insert all the docs from sender but those which _ids found at receiver
 func (ms *MongoSync) syncCollection(ctx context.Context, collName string, maxBulkCount int, syncId string) error {
 	log.Infof("cloning collection %s...", collName)
-	ms.Lock()
-	ms.collSyncId[collName] = syncId
-	ms.Unlock()
 	models := make([]mongo.WriteModel, maxBulkCount)
 	count := 0
 	flush := func() {
@@ -84,31 +81,56 @@ func (ms *MongoSync) syncCollection(ctx context.Context, collName string, maxBul
 // so it can start dealing with oplogST starting with that Id
 // it returns nil if it was able to clone all the collections
 // successfully into chBulkWriteOps channels
-func (ms *MongoSync) SyncCollections(ctx context.Context) {
+func (ms *MongoSync) SyncCollections(ctx context.Context, collSyncId map[string]string) {
 	defer ms.routines.Done() // SyncCollections
 	// here we clone those collections which does not have sync_id
 	// get all collections from database and clone those without sync_id
 	colls, err := ms.Sender.ListCollectionNames(ctx, allRecords)
 	if err != nil {
-		log.Errorf("critical error:failed to obtain collection list: %s", err)
-		return
+		log.Fatalf("critical error:failed to obtain collection list: %s", err)
 	}
+	syncId := make(chan string, 1)
+	// create tailing oplog channel for updating SyncId while syncing collections
+	oplogCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var oplog Oplog
 	for _, coll := range colls {
 		if ctx.Err() != nil {
 			log.Debug("SyncCollections gracefully shutdown on cancelled context")
-			return
+			break
 		}
 		config, rt := ms.collMatch(coll)
-		if config == nil || rt {
+		if _, ok := collSyncId[coll]; ok || config == nil || rt {
 			continue
 		}
-		// we copy only ST collections which do not have a bookmark in collSyncId
-		if _, ok := ms.collSyncId[coll]; !ok {
-			log.Infof("no SyncId for coll %s found, it will be synced before following oplog", coll)
-			syncId := ms.getLastSyncId()
-			if err := ms.syncCollection(ctx, coll, config.Batch, syncId); err != nil {
-				log.Errorf("sync collection %s for the exchange %s failed: %s", coll, ms.Name(), err)
+		if oplog == nil {
+			// create oplog which follows lastSync id. This is needed only for collection sync
+			var err error
+			oplog, err = ms.getOplog(oplogCtx, ms.Sender, "")
+			if err != nil {
+				log.Fatalf("failed to get oplog, perhaps it is not activated: %s", err)
 			}
+			ms.routines.Add(1)
+			go func() {
+				// tail oplog to update syncId for syncCollection. then, close channel
+				for op := range oplog {
+					SendState(syncId, getSyncId(op))
+				}
+				ms.routines.Done() // oplog for SyncCollections
+			}()
+			// trigger some change on sender to find out last SyncId
+			coll := ms.Sender.Collection("rnd" + GetRandomHex(8))
+			// make some update to generate oplogRT
+			if _, err := coll.InsertOne(ctx, bson.D{}); err != nil {
+				log.Fatalf("failed to update sender in order to find out last syncId: %s", err)
+			}
+			_ = coll.Drop(ctx)
+		}
+		// we copy only ST collections which do not have a bookmark in collSyncId
+		syncId := GetState(syncId)
+		collSyncId[coll] = syncId
+		if err := ms.syncCollection(ctx, coll, config.Batch, syncId); err != nil {
+			log.Errorf("sync collection %s for the exchange %s failed: %s", coll, ms.Name(), err)
 		}
 	}
 	return

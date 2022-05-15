@@ -12,21 +12,20 @@ import (
 	"yadex/utils"
 )
 
-var c = &config.Config{
+var rtConfig = map[string]*config.DataSync{"realtime": {
+	Delay:   99,
+	Batch:   8192, // bytes
+	Exclude: nil,
+}}
+var cfg = &config.Config{
 	Exchanges: []*config.ExchangeConfig{
 		{
 			SenderURI:   "mongodb://localhost:27021",
 			SenderDB:    "test",
 			ReceiverURI: "mongodb://localhost:27023",
 			ReceiverDB:  "test",
-			RT: map[string]*config.DataSync{"realtime": {
-				Delay:   99,
-				Batch:   8192, // bytes
-				Exclude: nil,
-			},
-			},
 			ST: map[string]*config.DataSync{".*": {
-				Delay:   999,
+				Delay:   99,
 				Batch:   1024 * 128, // bytes
 				Exclude: []string{"realtime"},
 			},
@@ -40,7 +39,8 @@ func TestNewMongoSync(t *testing.T) {
 	config.SetLogger(log.InfoLevel)
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	ms, err := NewMongoSync(ctx, c.Exchanges[0])
+	ready := make(chan bool, 1)
+	ms, err := NewMongoSync(ctx, cfg.Exchanges[0], ready)
 	require.Nil(t, err)
 	require.NotNil(t, ms)
 	// wait for possible oplogST processing
@@ -52,79 +52,70 @@ func TestNewMongoSync(t *testing.T) {
 // 3. insert another N records
 // 4. sync to the receiver. This time it should be N records copied, not N*2
 func TestSync(t *testing.T) {
+	const countMany = int64(50000)
+	const countLoop = int64(10)
+	var ids []interface{}
 	config.SetLogger(log.TraceLevel)
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	ms, err := NewMongoSync(ctx, ExchCfg)
+	ready := make(chan bool, 1)
+	ms, err := NewMongoSync(ctx, ExchCfg, ready)
 	// drop sync bookmarks, can be evil over time
 	require.NoError(t, err)
 	require.NotNil(t, ms)
+	log.Infof("dropping MSync bookmarks")
 	require.NoError(t, ms.syncId.Drop(ctx))
 	const collName = "test"
-	// start syncing
-	started := time.Now()
+	receiverColl := ms.Receiver.Collection(collName)
+	log.Infof("Dropping %s collection at the receiver and the sender ", collName)
+	require.NoError(t, receiverColl.Drop(ctx))
+	coll := ms.Sender.Collection(collName)
+	require.NoError(t, coll.Drop(ctx))
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		log.Infof("Starting syncing %s", ms.Name())
 		ms.Run(ctx)
 		log.Info("Gracefully leaving mongoSync.Run")
 	}()
-	receiverColl := ms.Receiver.Collection(collName)
-	require.NoError(t, receiverColl.Drop(ctx))
-	coll := ms.Sender.Collection(collName)
-	require.NoError(t, coll.Drop(ctx))
+	// start syncing
+	started := time.Now()
+	var filter interface{}
+	log.Infof("Waiting InsertOne to arrive at the receiver %s", ms.Name())
 	ir, err := coll.InsertOne(ctx, bson.D{{"name", "one"}})
-	const countMany = int64(50000)
-	const countLoop = int64(10)
-	var ids []interface{}
+	require.NoError(t, err)
+	require.NoError(t, ms.WaitJobDone(time.Millisecond*500))
+	filter = bson.M{"_id": ir.InsertedID}
+	cc, err := receiverColl.CountDocuments(ctx, filter)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), cc)
+	log.Infof("Waiting DeleteOne to arrive at the receiver %s", ms.Name())
+	dr, err := coll.DeleteOne(ctx, filter)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), dr.DeletedCount)
+	ms.WaitJobDone(time.Millisecond * 500)
+	// remove 1 r before wait
+	// delete inserted first
+	c, err := receiverColl.CountDocuments(ctx, filter)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), c)
+	log.Infof("Waiting InsertMany(%d) to arrive at the receiver %s", countMany*countLoop, ms.Name())
 	for i := int64(0); i < countLoop; i++ {
 		ir, err := coll.InsertMany(ctx, CreateDocs(i*countMany+1, countMany))
 		require.NoError(t, err)
 		ids = append(ids, ir.InsertedIDs...)
-		time.Sleep(time.Millisecond * 100)
+		//time.Sleep(time.Millisecond * 50)
 	}
-	require.NoError(t, err)
-	// remove 1 r before wait
-	ms.WaitIdle(time.Millisecond * 100)
-	// delete inserted first
-	filter := bson.M{"_id": ir.InsertedID}
-	dr, err := coll.DeleteOne(ctx, filter)
-	require.NoError(t, err)
-	require.Equal(t, int64(1), dr.DeletedCount)
-	c, err := receiverColl.CountDocuments(ctx, filter)
-	require.NoError(t, err)
-	require.Equal(t, int64(1), c)
-	//time.Sleep(time.Second/2)
-	ms.WaitIdle(time.Millisecond * 100)
-	c, err = receiverColl.CountDocuments(ctx, filter)
-	require.NoError(t, err)
-	require.Equal(t, int64(0), c)
+	ms.WaitJobDone(time.Second * 5)
 	c, err = receiverColl.CountDocuments(ctx, bson.M{"_id": bson.M{"$in": ids}})
 	require.NoError(t, err)
 	require.Equal(t, countMany*countLoop, c)
 	duration := time.Since(started)
 	log.Infof("Transferred %d bytes in %v, avg speed %s b/s", ms.totalBulkWrite, duration,
 		utils.IntCommaB(ms.totalBulkWrite*int(time.Second)/int(duration)))
-}
-
-func (ms *MongoSync) RunUntilIdle(ctx context.Context, f func()) {
-	cCtx, cCancel := context.WithCancel(ctx)
-	done := make(chan struct{}, 1)
-	go func() {
-		ms.runSync(cCtx)
-		done <- struct{}{}
-	}()
-	//ms.idleST <- false // reset idle to false
-	log.Tracef("before execution")
-	time.Sleep(time.Second)
-	if f != nil {
-		f()
-	}
-	log.Tracef("wait after execution")
-	<-ms.idle
-	cCancel()
-	<-done
+	cancel()
+	wg.Wait()
 }
 
 func TestCollSync2(t *testing.T) {
@@ -139,15 +130,36 @@ func TestCollSync2(t *testing.T) {
 	config.SetLogger(log.TraceLevel)
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	ms, err := NewMongoSync(ctx, ExchCfg)
+	ready := make(chan bool, 1)
+	ms, err := NewMongoSync(ctx, ExchCfg, ready)
 	// drop sync bookmarks, can be evil over time
 	require.NoError(t, err)
 	require.NotNil(t, ms)
 	require.NoError(t, ms.syncId.Drop(ctx))
-	coll := ms.Sender.Collection("test")
+	collName := "test"
+	count := 100
+	coll := ms.Sender.Collection(collName)
+	rcoll := ms.Receiver.Collection(collName)
 	require.NoError(t, coll.Drop(ctx))
+	require.NoError(t, rcoll.Drop(ctx))
+	// 1. create some testXX
 	ir, err := coll.InsertMany(ctx, CreateDocs(1, 100))
 	require.NoError(t, err)
-	require.Equal(t, 100, len(ir.InsertedIDs))
-	ms.RunUntilIdle(ctx, nil)
+	require.Equal(t, count, len(ir.InsertedIDs))
+
+	// 2. run sync
+	go ms.Run(ctx)
+	ms.WaitJobDone(time.Millisecond * 100)
+	// 3. check whether they were copied
+
+	receiverIds := fetchIds(ctx, rcoll)
+	require.Equal(t, count, len(receiverIds))
+	filter := bson.M{"_id": bson.M{"$in": receiverIds}}
+	lcount, err := coll.CountDocuments(ctx, filter)
+	require.NoError(t, err)
+	require.Equal(t, int64(count), lcount)
+	// 4. make some changes to TestXX and create TestNewXX
+	// 5. Run Sync.
+	// 6. Make sure everything synced
+
 }

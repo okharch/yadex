@@ -12,6 +12,16 @@ func getCollName(op bson.Raw) string {
 	return op.Lookup("ns", "coll").StringValue()
 }
 
+// getOpName shows what operation coming from oplog
+func getOpName(op bson.Raw) string {
+	if op == nil {
+		return "nil"
+	}
+	coll := op.Lookup("ns", "coll").StringValue()
+	opTypeName := op.Lookup("operationType").StringValue()
+	return coll + ":" + opTypeName
+}
+
 // getSyncId extracts _id._data portion of op(log)
 func getSyncId(op bson.Raw) string {
 	return op.Lookup("_id", "_data").StringValue()

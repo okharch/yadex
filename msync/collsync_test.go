@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson"
 	"testing"
+	"time"
 	"yadex/config"
 )
 
@@ -37,7 +38,8 @@ func CreateDocs(start, numRecs int64) []interface{} {
 func TestSyncCollection(t *testing.T) {
 	config.SetLogger(log.InfoLevel)
 	ctx, cancel := context.WithCancel(context.TODO())
-	ms, err := NewMongoSync(ctx, ExchCfg)
+	ready := make(chan bool, 1)
+	ms, err := NewMongoSync(ctx, ExchCfg, ready)
 	require.NoError(t, err)
 	require.NotNil(t, ms)
 	const collName = "test"
@@ -59,10 +61,7 @@ func TestSyncCollection(t *testing.T) {
 	err = ms.syncCollection(ctx, "test", 1024*128, "!")
 	require.NoError(t, err)
 	close(ms.bulkWriteST)
-	ms.routines.Add(1)
-	go ms.runIdle(ctx)
-	<-ms.idle
-	require.Equal(t, "!", ms.collSyncId["test"])
+	ms.WaitJobDone(time.Millisecond * 500)
 	// now check what we have received at the receiver
 	count, err := ms.Receiver.Collection(collName).CountDocuments(ctx, bson.M{"_id": bson.M{"$in": res.InsertedIDs}})
 	require.NoError(t, err)
@@ -81,7 +80,8 @@ func TestSyncCollectionMultiple(t *testing.T) {
 	config.SetLogger(log.InfoLevel)
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	ms, err := NewMongoSync(ctx, ExchCfg)
+	ready := make(chan bool, 1)
+	ms, err := NewMongoSync(ctx, ExchCfg, ready)
 	require.NoError(t, err)
 	require.NotNil(t, ms)
 	require.NoError(t, err)
@@ -110,9 +110,7 @@ func TestSyncCollectionMultiple(t *testing.T) {
 		//close(ms.oplogST)
 		close(ms.bulkWriteST)
 		ms.routines.Add(1)
-		go ms.runIdle(ctx)
-		<-ms.idle
-		require.Equal(t, "!", ms.collSyncId["test"])
+		ms.WaitJobDone(time.Millisecond * 500)
 		// check all records inserted
 		c, err := receiverColl.CountDocuments(ctx, bson.D{})
 		require.NoError(t, err)

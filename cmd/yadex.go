@@ -11,18 +11,16 @@ import (
 )
 
 func createExchanges(ctx context.Context, cfg *config.Config) []*msync.MongoSync {
-	result := make([]*msync.MongoSync, len(cfg.Exchanges))
-	count := 0
-	for _, s := range cfg.Exchanges {
-		ms, err := msync.NewMongoSync(ctx, s)
+	makeMSync := func(s *config.ExchangeConfig) *msync.MongoSync {
+		ready := make(chan bool, 1)
+		ms, err := msync.NewMongoSync(ctx, s, ready)
 		if err != nil {
 			log.Errorf("Failed to establish sync %s", ms.Name())
-			continue
+			return nil
 		}
-		result[count] = ms
-		count++
+		return ms
 	}
-	return result[:count]
+	return msync.MapSlice(cfg.Exchanges, makeMSync)
 }
 
 var configFileName string
@@ -61,6 +59,9 @@ func main() {
 		ctx, cancel = context.WithCancel(context.Background())
 		mss := createExchanges(ctx, cfg)
 		for _, ms := range mss {
+			if ms == nil {
+				continue
+			}
 			waitExchanges.Add(1)
 			go func(ms *msync.MongoSync) {
 				defer waitExchanges.Done()

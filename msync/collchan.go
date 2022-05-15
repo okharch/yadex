@@ -6,6 +6,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
+	"strings"
 	"sync"
 	"time"
 	"yadex/config"
@@ -14,6 +15,9 @@ import (
 // getCollChan returns channel of Oplog for the collection.
 // it launches goroutine which pops operation from that channel and flushes BulkWriteOp using putBWOp func
 func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *config.DataSync, realtime bool) chan<- bson.Raw {
+	if ctx.Err() != nil {
+		return make(chan bson.Raw, 1) // buffered, but ignore any input
+	}
 	ms.RLock()
 	sendCh, ok := ms.collChan[collName]
 	ms.RUnlock()
@@ -62,7 +66,7 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 		models = nil
 		log.Tracef("flusing %s %d %d due %s", collName, count, totalBytes, reason)
 		totalBytes = 0
-		ms.setCollUpdateTotal(collName, totalBytes)
+		ms.setCollUpdated(collName, false)
 		ms.putBwOp(bwOp)
 		flushed = time.Now()
 	}
@@ -92,6 +96,9 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 				// opLogDrop flushed immediately
 				log.Tracef("coll %s flush on opLogDrop", collName)
 				flush("opLogDrop")
+				log.Tracef("coll drop, send dirty <- true")
+				ms.setCollUpdated(collName, false)
+				ms.dirty <- true // update buffers become dirty
 				continue
 			case OpLogUnknown: // ignore op
 				log.Warnf("Operation of unknown type left unhandled:%+v", op)
@@ -105,7 +112,7 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 			lastOp = op
 			models = append(models, writeModel)
 			totalBytes += len(op)
-			ms.setCollUpdateTotal(collName, totalBytes)
+
 			if len(models) == 1 {
 				// we just put 1st item, set timer to flush after maxFlushDelay
 				// unless it is filled up to (max)maxBatch items
@@ -122,6 +129,8 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 						ch <- nil // flush() without lock
 					}
 				}()
+				ms.setCollUpdated(collName, true)
+				ms.dirty <- true // update buffers become dirty
 			}
 		}
 	}()
@@ -134,18 +143,17 @@ func (ms *MongoSync) runFlush(ctx context.Context) {
 	defer ms.routines.Done() // runFlush
 	for range ms.flush {
 		ms.collBuffersMutex.RLock()
-		collChans := make([]chan<- bson.Raw, len(ms.collBuffers))
-		count := 0
-		for coll := range ms.collBuffers {
-			collChans[count] = ms.collChan[coll]
-			count++
-		}
+		colls := Keys(ms.collUpdated)
 		ms.collBuffersMutex.RUnlock()
-		for _, collChan := range collChans {
+		log.Tracef("flusing buffers from %s...", strings.Join(colls, ", "))
+		for _, coll := range colls {
 			if ctx.Err() != nil {
+				log.Debug("runFlush gracefully shutdown on cancelled context")
 				return // otherwise, we might as well send nil to closed channel
 			}
-			collChan <- nil // flush
+			if collChan, ok := ms.collChan[coll]; ok {
+				collChan <- nil
+			}
 		}
 	}
 	log.Debug("runFlush gracefully shutdown on closed channel")

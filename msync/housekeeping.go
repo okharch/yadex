@@ -1,8 +1,8 @@
 package mongosync
 
 import (
+	"fmt"
 	log "github.com/sirupsen/logrus"
-	"go.mongodb.org/mongo-driver/bson"
 	"time"
 )
 
@@ -32,80 +32,22 @@ func (ms *MongoSync) getBWSpeed() int {
 	return totalBytes * int(time.Second) / int(totalDuration)
 }
 
-func (ms *MongoSync) addBulkWrite(delta int) {
-	ms.bulkWriteMutex.Lock()
-	ms.pendingBulkWrite += delta
-	if delta > 0 {
-		ms.totalBulkWrite += delta
-	}
-	ms.bulkWriteMutex.Unlock()
-}
-
-func (ms *MongoSync) getBulkWriteTotal() int {
-	ms.bulkWriteMutex.RLock()
-	defer ms.bulkWriteMutex.RUnlock()
-	return ms.pendingBulkWrite
-}
-
 // updates size of  pending  coll's BulkWrite buffer
-func (ms *MongoSync) setCollUpdateTotal(coll string, total int) {
+func (ms *MongoSync) setCollUpdated(coll string, updated bool) {
 	ms.collBuffersMutex.Lock()
-	defer ms.collBuffersMutex.Unlock()
-	oldTotal := ms.collBuffers[coll]
-	if total == 0 {
-		delete(ms.collBuffers, coll)
+	if updated {
+		ms.collUpdated[coll] = struct{}{}
 	} else {
-		ms.collBuffers[coll] = total
+		delete(ms.collUpdated, coll)
 	}
-	ms.pendingBuffers += total - oldTotal
+	ms.collBuffersMutex.Unlock()
 }
 
 // getPendingBuffers returns total of bulkwrite buffers pending at coll's channels
-func (ms *MongoSync) getPendingBuffers() int {
-	ms.RLock()
-	defer ms.RUnlock()
-	return ms.pendingBuffers
-}
-
-// WaitIdle wait predefined period and then waits until all input/output/updated channels cleared
-func (ms *MongoSync) WaitIdle(timeout time.Duration) {
-	log.Infof("WaitIdle :timeout %v", timeout)
-	//time.Sleep(timeout)
-	select {
-	case <-time.After(timeout):
-		log.Tracef("WaitIdle:leaving on timer")
-	case <-ms.idle:
-		log.Tracef("WaitIdle:leaving on idle")
-		return
-	}
-	<-ms.idle
-}
-
-func (ms *MongoSync) checkIdle(reason string) {
-	ms.Lock()
-	if ms.pendingBulkWrite == 0 && ms.pendingBuffers == 0 {
-		// close channels, clear collChan
-		log.Tracef("checkIdle: closing all colls channels...")
-		for _, ch := range ms.collChan {
-			close(ch)
-		}
-		// reset collChan map, no need to lock, it is
-		ms.collChan = make(map[string]chan<- bson.Raw)
-		ms.Unlock()
-		handled := Signal(ms.idle)
-		log.Infof("checkIdle:%s:Sent IDLE signal, handled: %v", reason, handled)
-		return
-	}
-	ms.Unlock()
-	if ms.getPendingBulkWrite() == 0 {
-		pendingBuffers := ms.getPendingBuffers()
-		ClearSignal(ms.idle)
-		handled := Signal(ms.flush)
-		log.Tracef("checkIdle:%s:Sent FLUSH signal (%d pending), handled: %v", reason, pendingBuffers, handled)
-	} else {
-		ClearSignal(ms.idle)
-		log.Tracef("checkIdle:%s: pendingBulkWrite %d: no signals", reason, ms.pendingBulkWrite)
-	}
+func (ms *MongoSync) getCollUpdated() bool {
+	ms.collBuffersMutex.RLock()
+	defer ms.collBuffersMutex.RUnlock()
+	return len(ms.collUpdated) > 0
 }
 
 // Signal sends signal to channel non-blocking way
@@ -119,13 +61,70 @@ func Signal(ch chan struct{}) bool {
 	return false
 }
 
-func ClearSignal(ch chan struct{}) {
-	for {
-		// nb read from channel until empty
+// runDirt serves dirty channel which triggered by various routines
+// to check if msync is dirty.
+// It finds out real state of the msync object and if it becomes changed
+// it broadcasts that change using IsClean channel
+// if it finds signal "non-dirty" (which it can receive from idling oplog or clean bulkwrite channel),
+// it sends flush Signal (non-blocking) in order to flush pending buffers
+func (ms *MongoSync) runDirt() {
+	defer ms.routines.Done()
+	oldDirty := true // consider it dirty at first so need to check real dirt after first clean signal
+	for dirty := range ms.dirty {
+		//log.Tracef("runDirt : %v old %v bw %d buf %d", dirty, oldDirty, ms.getPendingBulkWrite(), ms.getCollUpdated())
+		if dirty == oldDirty {
+			continue // ignore if state have not changed
+		}
+		if !dirty {
+			// check if it is clean indeed
+			if ms.getPendingBulkWrite() != 0 {
+				continue // still dirty, don't change the state
+			}
+			// try to flush buffers, if they are not clean
+			if ms.getCollUpdated() {
+				Signal(ms.flush)
+				continue // still dirty, don't change the state
+			}
+		}
+		if dirty != oldDirty {
+			log.Tracef("sending clean: %v", !dirty)
+			SendState(ms.IsClean, !dirty)
+			if !dirty {
+				log.Infof("msync idling for changes...")
+			}
+		}
+		oldDirty = dirty
+	}
+}
+
+// WaitJobDone gets current ms.dirty state. If it is clean, it waits timeout if it stays clear all the time.
+// WaitJobDone is intended for unit tests.
+// it also checks ms.ready and returns error if it is not
+// It also checks if IsClean closed then it returns with error
+func (ms *MongoSync) WaitJobDone(timeout time.Duration) error {
+	WaitState(ms.ready, true, "ms.ready")
+	ok := true
+	for ok {
+		if !GetState(ms.ready) {
+			return fmt.Errorf("ms is not ready")
+		}
+		// we are clean here
+		log.Trace("JobDone: waiting clean")
+		var clean bool
+		clean, ok = <-ms.IsClean
+		log.Tracef("JobDone: got clean %v state", clean)
+		if !clean {
+			continue
+		}
+		log.Tracef("JobDone: waiting it is clean for %v", timeout)
 		select {
-		case <-ch:
-		default:
-			return
+		case clean, ok = <-ms.IsClean:
+			log.Tracef("JobDone: got clean %v state(must be false)", clean)
+			continue
+		case <-time.After(timeout):
+			log.Trace("JobDone: ready!")
+			return nil
 		}
 	}
+	return fmt.Errorf("JobDone: IsClean channel closed")
 }
