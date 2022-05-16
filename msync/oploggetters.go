@@ -9,7 +9,15 @@ import (
 
 // getCollName extracts collection's name from op(log)
 func getCollName(op bson.Raw) string {
-	return op.Lookup("ns", "coll").StringValue()
+	return getString(op.Lookup("ns", "coll"), "")
+}
+
+func getString(v bson.RawValue, ifEmpty string) string {
+	if len(v.Value) == 0 {
+		return ifEmpty
+	}
+	return v.StringValue()
+
 }
 
 // getOpName shows what operation coming from oplog
@@ -17,19 +25,19 @@ func getOpName(op bson.Raw) string {
 	if op == nil {
 		return "nil"
 	}
-	coll := op.Lookup("ns", "coll").StringValue()
-	opTypeName := op.Lookup("operationType").StringValue()
+	coll := getCollName(op)
+	opTypeName := getString(op.Lookup("operationType"), "empty op")
 	return coll + ":" + opTypeName
 }
 
 // getSyncId extracts _id._data portion of op(log)
 func getSyncId(op bson.Raw) string {
-	return op.Lookup("_id", "_data").StringValue()
+	return getString(op.Lookup("_id", "_data"), "")
 }
 
 // getWriteModel decodes op(log) into OpLogType and WriteModel
 func getWriteModel(op bson.Raw) (opLogType OpLogType, model mongo.WriteModel) {
-	opTypeName := op.Lookup("operationType").StringValue()
+	opTypeName := getString(op.Lookup("operationType"), "")
 	opLogType = OpLogOrdered
 	switch opTypeName {
 	case "insert":

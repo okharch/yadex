@@ -53,7 +53,7 @@ func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId st
 					ms.dirty <- false // ST oplog tells it will be idling
 				}
 				next = changeStream.Next(ctx)
-				log.Tracef("oplog idle finished: %s", getOpName(changeStream.Current))
+				log.Infof("oplog idle finished: %s", getOpName(changeStream.Current))
 			}
 			if next {
 				ch <- changeStream.Current
@@ -157,6 +157,9 @@ func (ms *MongoSync) runSToplog(ctx context.Context, collSyncId map[string]strin
 	// loop until context tells we are done
 	for op := range ms.oplogST {
 		collName := getCollName(op)
+		if collName == "" {
+			continue
+		}
 		// check if it is subject to sync
 		config, rt := ms.collMatch(collName)
 		if rt || config == nil {
@@ -194,6 +197,9 @@ func (ms *MongoSync) runRToplog(ctx context.Context) {
 	defer ms.routines.Done() // runRToplog
 	for op := range ms.oplogRT {
 		collName := getCollName(op)
+		if collName == "" {
+			continue
+		}
 		// check if it is synced
 		config, rt := ms.collMatch(collName)
 		if rt {
