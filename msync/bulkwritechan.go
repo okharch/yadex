@@ -4,7 +4,6 @@ import (
 	"context"
 	log "github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"sync"
@@ -145,19 +144,22 @@ func (ms *MongoSync) BulkWriteOp(ctx context.Context, bwOp *BulkWriteOp) {
 	}
 	// update SyncId for the collection
 	if !bwOp.RealTime && bwOp.SyncId != "" {
-		upsert := true
-		optUpsert := &options.ReplaceOptions{Upsert: &upsert}
-		id := bson.E{Key: "_id", Value: bwOp.Coll}
-		syncId := bson.E{Key: "sync_id", Value: bwOp.SyncId}
-		updated := bson.E{Key: "updated", Value: primitive.NewDateTimeFromTime(time.Now())}
-		filter := bson.D{id}
-		doc := bson.D{id, syncId, updated}
-		if r, err := ms.syncId.ReplaceOne(ctx, filter, doc, optUpsert); err != nil {
-			log.Warnf("failed to update sync_id for collAtReceiver %s: %s", bwOp.Coll, err)
-		} else {
-			log.Tracef("Coll found(updated) %d(%d) %s.sync_id %s", r.MatchedCount, r.UpsertedCount+r.ModifiedCount, bwOp.Coll,
-				bwOp.SyncId)
+		doc := collSyncP{SyncId: bwOp.SyncId, CollName: bwOp.Coll}
+		ms.collBuffersMutex.RLock()
+		doc.Pending = Keys(ms.stUpdated)
+		ms.collBuffersMutex.RUnlock()
+		_, err := ms.syncId.InsertOne(ctx, &doc)
+		if err != nil {
+			log.Errorf("failed to update sync_id for %s: %s", bwOp.Coll, err)
+			return
 		}
+		filter := bson.M{"collName": bwOp.Coll, "_id": bson.M{"$lt": bwOp.SyncId}}
+		dr, err := ms.syncId.DeleteMany(ctx, filter)
+		if err != nil {
+			log.Errorf("failed to update sync_id for %s: %s", bwOp.Coll, err)
+			return
+		}
+		log.Tracef("purged %d previous bookmarks for %s", dr.DeletedCount, bwOp.Coll)
 	}
 }
 

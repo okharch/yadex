@@ -33,12 +33,23 @@ func (ms *MongoSync) getBWSpeed() int {
 }
 
 // updates size of  pending  coll's BulkWrite buffer
-func (ms *MongoSync) setCollUpdated(coll string, updated bool) {
+func (ms *MongoSync) setSTUpdated(coll string, updated bool) {
 	ms.collBuffersMutex.Lock()
 	if updated {
-		ms.collUpdated[coll] = struct{}{}
+		ms.stUpdated[coll] = struct{}{}
 	} else {
-		delete(ms.collUpdated, coll)
+		delete(ms.stUpdated, coll)
+	}
+	ms.collBuffersMutex.Unlock()
+}
+
+// updates size of  pending  coll's BulkWrite buffer
+func (ms *MongoSync) setRTUpdated(coll string, updated bool) {
+	ms.collBuffersMutex.Lock()
+	if updated {
+		ms.rtUpdated[coll] = struct{}{}
+	} else {
+		delete(ms.rtUpdated, coll)
 	}
 	ms.collBuffersMutex.Unlock()
 }
@@ -47,7 +58,7 @@ func (ms *MongoSync) setCollUpdated(coll string, updated bool) {
 func (ms *MongoSync) getCollUpdated() bool {
 	ms.collBuffersMutex.RLock()
 	defer ms.collBuffersMutex.RUnlock()
-	return len(ms.collUpdated) > 0
+	return len(ms.rtUpdated)+len(ms.stUpdated) > 0
 }
 
 // Signal sends signal to channel non-blocking way

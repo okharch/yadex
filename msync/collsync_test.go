@@ -58,10 +58,10 @@ func TestSyncCollection(t *testing.T) {
 	ms.routines.Add(1)
 	go ms.runSTBulkWrite(ctx)
 	// run syncCollection to transfer coll from sender to receiver
-	err = ms.syncCollection(ctx, "test", 1024*128, "!")
+	//err = ms.syncCollection(ctx, "test", 1024*128, "!")
 	require.NoError(t, err)
 	close(ms.bulkWriteST)
-	ms.WaitJobDone(time.Millisecond * 500)
+	require.NoError(t, ms.WaitJobDone(time.Millisecond*500))
 	// now check what we have received at the receiver
 	count, err := ms.Receiver.Collection(collName).CountDocuments(ctx, bson.M{"_id": bson.M{"$in": res.InsertedIDs}})
 	require.NoError(t, err)
@@ -105,12 +105,12 @@ func TestSyncCollectionMultiple(t *testing.T) {
 		ms.routines.Add(1)
 		go ms.runSTBulkWrite(ctx)
 		// run syncCollection to transfer coll from sender to receiver
-		err = ms.syncCollection(ctx, "test", 1024*128, "!")
+		//err = ms.syncCollection(ctx, "test", 1024*128, "!")
 		require.NoError(t, err)
 		//close(ms.oplogST)
 		close(ms.bulkWriteST)
 		ms.routines.Add(1)
-		ms.WaitJobDone(time.Millisecond * 500)
+		require.NoError(t, ms.WaitJobDone(time.Millisecond*500))
 		// check all records inserted
 		c, err := receiverColl.CountDocuments(ctx, bson.D{})
 		require.NoError(t, err)

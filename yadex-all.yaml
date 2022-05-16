@@ -1,0 +1,27 @@
+exchanges:
+  - senderuri: mongodb://localhost:27021
+    senderdb: IonM
+    receiveruri: mongodb://localhost:27023
+    receiverdb: IonM
+    st:
+        .*:
+            mindelay: 0
+            delay: 1000
+            batch: 500
+  - senderuri: mongodb://localhost:27021
+    senderdb: IonM
+    receiveruri: mongodb://localhost:27024
+    receiverdb: IonM
+    rt:
+        realtime:
+            mindelay: 0
+            delay: 100
+            batch: 500
+            exclude: []
+    st:
+        .*:
+            mindelay: 0
+            delay: 100
+            batch: 500
+            exclude:
+              - realtime

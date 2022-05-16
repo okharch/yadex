@@ -1,10 +1,8 @@
 package mongosync
 
 import (
-	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
-	"testing"
 )
 
 // getCollName extracts collection's name from op(log)
@@ -25,9 +23,10 @@ func getOpName(op bson.Raw) string {
 	if op == nil {
 		return "nil"
 	}
+	syncId := getSyncId(op)
 	coll := getCollName(op)
 	opTypeName := getString(op.Lookup("operationType"), "empty op")
-	return coll + ":" + opTypeName
+	return coll + ":" + opTypeName + " @ " + syncId
 }
 
 // getSyncId extracts _id._data portion of op(log)
@@ -56,9 +55,9 @@ func getWriteModel(op bson.Raw) (opLogType OpLogType, model mongo.WriteModel) {
 	return opLogType, model
 }
 
-// createOp is used by various unit tests to convert bson.M into bson.Raw
-func createOp(t *testing.T, op bson.M) (r bson.Raw) {
-	r, err := bson.Marshal(op)
-	require.NoError(t, err)
-	return
-}
+//// createOp is used by various unit tests to convert bson.M into bson.Raw
+//func createOp(t *testing.T, op bson.M) (r bson.Raw) {
+//	r, err := bson.Marshal(op)
+//	require.NoError(t, err)
+//	return
+//}

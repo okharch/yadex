@@ -52,8 +52,8 @@ func TestNewMongoSync(t *testing.T) {
 // 3. insert another N records
 // 4. sync to the receiver. This time it should be N records copied, not N*2
 func TestSync(t *testing.T) {
-	const countMany = int64(50000)
-	const countLoop = int64(10)
+	const countMany = int64(50)
+	const countLoop = int64(2)
 	var ids []interface{}
 	config.SetLogger(log.TraceLevel)
 	ctx, cancel := context.WithCancel(context.TODO())

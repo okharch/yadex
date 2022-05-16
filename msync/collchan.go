@@ -68,10 +68,15 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 		log.Tracef("flusing %s %d %d due %s", collName, count, totalBytes, reason)
 		totalBytes = 0
 		if ctx.Err() != nil {
-			ms.setCollUpdated(collName, false)
-			ms.putBwOp(bwOp)
-			flushed = time.Now()
+			return
 		}
+		if realtime {
+			ms.setRTUpdated(collName, false)
+		} else {
+			ms.setSTUpdated(collName, false)
+		}
+		ms.putBwOp(bwOp)
+		flushed = time.Now()
 	}
 	// process channel of Oplog, collects similar operation to batches, flushing them to bulkWriteChan
 	go func() { // oplogST for collection
@@ -100,7 +105,11 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 				log.Tracef("coll %s flush on opLogDrop", collName)
 				flush("opLogDrop")
 				log.Tracef("coll drop, send dirty <- true")
-				ms.setCollUpdated(collName, false)
+				if realtime {
+					ms.setRTUpdated(collName, false)
+				} else {
+					ms.setSTUpdated(collName, false)
+				}
 				ms.dirty <- true // update buffers become dirty
 				continue
 			case OpLogUnknown: // ignore op
@@ -135,7 +144,11 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 						ch <- nil // flush() without lock
 					}
 				}()
-				ms.setCollUpdated(collName, true)
+				if realtime {
+					ms.setRTUpdated(collName, true)
+				} else {
+					ms.setSTUpdated(collName, true)
+				}
 				ms.dirty <- true // update buffers become dirty
 			}
 		}
@@ -149,7 +162,7 @@ func (ms *MongoSync) runFlush(ctx context.Context) {
 	defer ms.routines.Done() // runFlush
 	for range ms.flush {
 		ms.collBuffersMutex.RLock()
-		colls := Keys(ms.collUpdated)
+		colls := Keys(ms.rtUpdated)
 		ms.collBuffersMutex.RUnlock()
 		log.Tracef("flusing buffers from %s...", strings.Join(colls, ", "))
 		for _, coll := range colls {
