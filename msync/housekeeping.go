@@ -91,6 +91,8 @@ func (ms *MongoSync) runDirt() {
 			SendState(ms.IsClean, !dirty)
 			if !dirty {
 				log.Infof("msync idling for changes...")
+			} else {
+				log.Infof("msync replicating changes...")
 			}
 		}
 		oldDirty = dirty
