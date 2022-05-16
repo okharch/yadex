@@ -18,6 +18,7 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 	if ctx.Err() != nil {
 		return make(chan bson.Raw, 1) // buffered, but ignore any input
 	}
+	var ftCount sync.WaitGroup
 	ms.collChanMutex.RLock()
 	sendCh, ok := ms.collChan[collName] // collChanMutex.RLock
 	ms.collChanMutex.RUnlock()
@@ -119,8 +120,11 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 				// we just put 1st item, set timer to flush after maxFlushDelay
 				// unless it is filled up to (max)maxBatch items
 				ftCancel()
+				ftCount.Wait()
 				flushTimer, ftCancel = context.WithCancel(context.Background())
+				ftCount.Add(1)
 				go func() {
+					defer ftCount.Done()
 					select {
 					case <-flushTimer.Done():
 						// we have done flush before maxFlushDelay, so no need to flush after timer expires
