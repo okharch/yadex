@@ -18,16 +18,16 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 	if ctx.Err() != nil {
 		return make(chan bson.Raw, 1) // buffered, but ignore any input
 	}
-	ms.RLock()
-	sendCh, ok := ms.collChan[collName]
-	ms.RUnlock()
+	ms.collChanMutex.RLock()
+	sendCh, ok := ms.collChan[collName] // collChanMutex.RLock
+	ms.collChanMutex.RUnlock()
 	if ok {
 		return sendCh
 	}
 	ch := make(chan bson.Raw)
-	ms.Lock()
-	ms.collChan[collName] = ch
-	ms.Unlock()
+	ms.collChanMutex.Lock()
+	ms.collChan[collName] = ch // collChanMutex.Lock
+	ms.collChanMutex.Unlock()
 	var bwLock sync.Mutex
 	// buffer for BulkWrite
 	minFlushDelay, maxFlushDelay, maxBatch := config.MinDelay, config.Delay, config.Batch
@@ -151,7 +151,10 @@ func (ms *MongoSync) runFlush(ctx context.Context) {
 				log.Debug("runFlush gracefully shutdown on cancelled context")
 				return // otherwise, we might as well send nil to closed channel
 			}
-			if collChan, ok := ms.collChan[coll]; ok {
+			ms.collChanMutex.RLock()
+			collChan, ok := ms.collChan[coll] // collChanMutex.RLock()
+			ms.collChanMutex.RUnlock()
+			if ok {
 				collChan <- nil
 			}
 		}

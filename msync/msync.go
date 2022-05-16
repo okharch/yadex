@@ -48,11 +48,12 @@ type MongoSync struct {
 	// When it starts sync session for an ST collection again it tries to resume syncing from that bookmark.
 	syncId *mongo.Collection
 	// this signal is sent right before oplog requires blocking log.Next statement so before getting blocked it sends this signal.
-	idleOpLog chan struct{}
-	oplogST   Oplog                      // follow ST changes
-	oplogRT   Oplog                      // follow RT changes
-	collMatch CollMatch                  // config, realtime nil and false if not found
-	collChan  map[string]chan<- bson.Raw // any collection has it's dedicated channel with dedicated goroutine.
+	idleOpLog     chan struct{}
+	oplogST       Oplog     // follow ST changes
+	oplogRT       Oplog     // follow RT changes
+	collMatch     CollMatch // config, realtime nil and false if not found
+	collChanMutex sync.RWMutex
+	collChan      map[string]chan<- bson.Raw // any collection has it's dedicated channel with dedicated goroutine.
 	// checkIdle facility, see checkIdle.go
 	countBulkWriteRT sync.WaitGroup      // this is used to prevent ST BulkWrites clash over RT line
 	collUpdated      map[string]struct{} // collName=>collBytes stores how many bytes pending in a collection buffer
@@ -112,10 +113,11 @@ func (ms *MongoSync) getTotalBulkWrite() int {
 // It is used after Stop in a case of Exchange is not available (either sender or receiver)
 // So it creates all channels and trying to resume from the safe point
 func (ms *MongoSync) Run(ctx context.Context) {
+	exCtx, exCancel := context.WithCancel(ctx)
+	defer exCancel()
 	senderAvail := false
 	receiverAvail := false
 	oldAvail := false
-	exCtx, exCancel := context.WithCancel(ctx)
 	var rsyncWG sync.WaitGroup
 	// this loop watches over parent context and exchange's connections available
 	// if they are not, it cancels exCtx so derived channels could be closed and synchronization stopped
@@ -125,7 +127,6 @@ func (ms *MongoSync) Run(ctx context.Context) {
 			ctx := context.TODO()
 			_ = ms.senderClient.Disconnect(ctx)
 			_ = ms.receiverClient.Disconnect(ctx)
-			exCancel()
 			return
 		case senderAvail = <-ms.senderAvailable:
 			if senderAvail {
@@ -153,14 +154,17 @@ func (ms *MongoSync) Run(ctx context.Context) {
 			if exAvail {
 				log.Infof("running exchange %s...", ms.Name())
 				log.Infof("Connection available, start syncing of %s again...", ms.Name())
-				rsyncWG.Add(1)
 				// create func to put BulkWriteOp into channel. It deals appropriate both with RT and ST
 				if err := ms.initSync(ctx); err != nil {
+					exCancel()
 					log.Fatalf("init failed: %s", err)
-					return
 				}
 				SendState(ms.ready, true, "ms.ready")
-				go ms.runSync(exCtx)
+				rsyncWG.Add(1)
+				go func() {
+					defer rsyncWG.Done()
+					ms.runSync(exCtx)
+				}()
 			} else {
 				SendState(ms.ready, false, "ms.ready")
 				log.Warnf("Exchange unavailable, stopping %s... ", ms.Name())
