@@ -182,6 +182,8 @@ func (ms *MongoSync) Run(ctx context.Context) {
 // It is used in a case of Exchange is not available (either sender or receiver connection fails)
 // it creates all the channels and trying to resume from the safe point
 func (ms *MongoSync) runSync(ctx context.Context) {
+	// you can count this using
+	// git grep ms.routines.|grep -v _test|grep -v SyncCollections|grep -v  getOplog|grep -v runSToplog
 	ms.routines.Add(7)
 	go ms.runCtxDone(ctx) // close channels on expired context
 	go ms.runDirt()       // serve dirty channel

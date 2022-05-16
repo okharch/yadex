@@ -82,7 +82,6 @@ func (ms *MongoSync) syncCollection(ctx context.Context, collName string, maxBul
 // it returns nil if it was able to clone all the collections
 // successfully into chBulkWriteOps channels
 func (ms *MongoSync) SyncCollections(ctx context.Context, collSyncId map[string]string) {
-	defer ms.routines.Done() // SyncCollections
 	// here we clone those collections which does not have sync_id
 	// get all collections from database and clone those without sync_id
 	colls, err := ms.Sender.ListCollectionNames(ctx, allRecords)
@@ -110,13 +109,13 @@ func (ms *MongoSync) SyncCollections(ctx context.Context, collSyncId map[string]
 			if err != nil {
 				log.Fatalf("failed to get oplog, perhaps it is not activated: %s", err)
 			}
-			ms.routines.Add(1)
+			ms.routines.Add(1) // run oplog for SyncCollections
 			go func() {
 				// tail oplog to update syncId for syncCollection. then, close channel
 				for op := range oplog {
 					SendState(syncId, getSyncId(op))
 				}
-				ms.routines.Done() // oplog for SyncCollections
+				ms.routines.Done() // run oplog for SyncCollections
 			}()
 			// trigger some change on sender to find out last SyncId
 			coll := ms.Sender.Collection("rnd" + GetRandomHex(8))

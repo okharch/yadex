@@ -39,7 +39,7 @@ func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId st
 	// provide oplogST entries to the channel, closes channel upon exit
 	go func() {
 		defer func() {
-			ms.routines.Done()
+			ms.routines.Done() // getOplog
 			close(ch)
 		}()
 		for {
@@ -140,9 +140,9 @@ func (ms *MongoSync) initSTOplog(ctx context.Context) error {
 		oplog, err = ms.getOplog(ctx, ms.Sender, "")
 	}
 	ms.oplogST = oplog
-	ms.routines.Add(1)
+	ms.routines.Add(1) // this is for go ms.runSToplog
 	go func() {
-		defer ms.routines.Done()
+		defer ms.routines.Done() // this is for go ms.runSToplog
 		ms.SyncCollections(ctx, collSyncId)
 		ms.runSToplog(ctx, collSyncId)
 	}()
