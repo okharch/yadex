@@ -66,9 +66,11 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 		models = nil
 		log.Tracef("flusing %s %d %d due %s", collName, count, totalBytes, reason)
 		totalBytes = 0
-		ms.setCollUpdated(collName, false)
-		ms.putBwOp(bwOp)
-		flushed = time.Now()
+		if ctx.Err() != nil {
+			ms.setCollUpdated(collName, false)
+			ms.putBwOp(bwOp)
+			flushed = time.Now()
+		}
 	}
 	// process channel of Oplog, collects similar operation to batches, flushing them to bulkWriteChan
 	go func() { // oplogST for collection
