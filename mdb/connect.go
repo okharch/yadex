@@ -40,7 +40,7 @@ func ConnectMongo(ctx context.Context, uri string) (client *mongo.Client, availa
 	clientOpts := options.Client().ApplyURI(uri).SetServerMonitor(svrMonitor).SetDirect(true)
 	client, err = mongo.Connect(ctx, clientOpts)
 	avail := <-available
-	expire := time.Now().Add(time.Second * 2)
+	expire := time.Now().Add(time.Second * 3)
 	for !avail && time.Now().Before(expire) {
 		select {
 		case avail = <-available:
