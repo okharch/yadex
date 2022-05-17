@@ -47,9 +47,6 @@ func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId st
 				log.Infof("oplog idle finished: %s", getOpName(changeStream.Current))
 			}
 			if next {
-				var op bson.M
-				_ = changeStream.Decode(&op)
-				log.Infof("%+v", op)
 				ch <- changeStream.Current
 				continue
 			}

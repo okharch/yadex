@@ -13,7 +13,6 @@ func TestGetOplog(t *testing.T) {
 	ctx := context.TODO()
 	ready := make(chan bool, 1)
 	ms, err := NewMongoSync(ctx, ExchCfg, ready)
-	ms.runDirt()
 	require.NoError(t, err)
 	require.NotNil(t, ms)
 	ctx, cancel := context.WithCancel(context.TODO())
@@ -25,7 +24,8 @@ func TestGetOplog(t *testing.T) {
 	go func() {
 		log.Info("getting OpCh")
 		op = <-opCh
-		log.Infof("got OpCh %s %s", getCollName(op), getSyncId(op))
+		db, collName := getNS(op)
+		log.Infof("got OpCh %s.%s %s", db, collName, getSyncId(op))
 		input.Done()
 	}()
 	log.Info("insert into test table")
