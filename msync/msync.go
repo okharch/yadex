@@ -55,15 +55,15 @@ type MongoSync struct {
 	collsSyncDone chan bool        // SyncCollections sends signal here when it is done
 	collChan      map[string]Oplog // any collection has it's dedicated channel with dedicated goroutine.
 	// checkIdle facility, see checkIdle.go
-	countBulkWriteRT                       sync.WaitGroup // this is used to prevent ST BulkWrites clash over RT line
-	rtUpdated, stUpdated                   map[string]struct{}
-	pendingBuffers                         int // pending bytes in collection's buffers
-	collBuffersMutex                       sync.RWMutex
-	pendingSTBulkWrite, pendingRTBulkWrite int // total of bulkWrite buffers queued at bulkWriteRT and bulkWriteST channels
-	totalBulkWrite                         int // this counts total bytes flushed to the receiver
-	bulkWriteMutex                         sync.RWMutex
-	bwLog                                  [bwLogSize]BWLog
-	bwLogIndex                             int
+	countBulkWriteRT     sync.WaitGroup // this is used to prevent ST BulkWrites clash over RT line
+	rtUpdated, stUpdated map[string]struct{}
+	pendingBuffers       int // pending bytes in collection's buffers
+	collBuffersMutex     sync.RWMutex
+	pendingSTBulkWrite   int // total of bulkWrite buffers queued at bulkWriteST channel
+	totalBulkWrite       int // this counts total bytes flushed to the receiver
+	bulkWriteMutex       sync.RWMutex
+	bwLog                [bwLogSize]BWLog
+	bwLogIndex           int
 	// flush signal when BulkWrite channel is idling
 	flush chan struct{}
 }

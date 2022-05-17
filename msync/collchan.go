@@ -68,7 +68,6 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 		log.Tracef("flusing %s %d %d due %s", collName, count, totalBytes, reason)
 		if realtime {
 			ms.setRTUpdated(collName, false)
-			ms.addRTBulkWrite(totalBytes)
 		} else {
 			ms.addSTBulkWrite(totalBytes)
 			ms.setSTUpdated(collName, false)

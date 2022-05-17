@@ -172,23 +172,6 @@ func (ms *MongoSync) addSTBulkWrite(delta int) {
 	}
 }
 
-// addSTBulkWrite modifies pendingSTBulkWrite and totalBulkWrite
-// if it finds out there is no pendingSTBulkWrite it sends State false to ms.dirty
-func (ms *MongoSync) addRTBulkWrite(delta int) {
-	ms.bulkWriteMutex.Lock()
-	ms.pendingRTBulkWrite += delta
-	if delta > 0 {
-		ms.totalBulkWrite += delta
-	}
-	bwClean := ms.pendingRTBulkWrite+ms.pendingSTBulkWrite == 0
-	ms.bulkWriteMutex.Unlock()
-	// here there is a chance we become clean, let runDirt find it out
-	if bwClean {
-		log.Trace("pendingSTBulkWrite=0, check dirt<-false")
-		ms.dirty <- false // BulkWrite buffers are clean
-	}
-}
-
 func (ms *MongoSync) WriteCollBookmark(ctx context.Context, collName, SyncId string) {
 	updated := time.Now()
 	doc := collSyncP{Updated: updated, SyncId: SyncId, CollName: collName}
