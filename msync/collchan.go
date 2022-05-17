@@ -66,14 +66,16 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 		}
 		models = nil
 		log.Tracef("flusing %s %d %d due %s", collName, count, totalBytes, reason)
+		if realtime {
+			ms.setRTUpdated(collName, false)
+			ms.addRTBulkWrite(totalBytes)
+		} else {
+			ms.addSTBulkWrite(totalBytes)
+			ms.setSTUpdated(collName, false)
+		}
 		totalBytes = 0
 		if ctx.Err() != nil {
 			return
-		}
-		if realtime {
-			ms.setRTUpdated(collName, false)
-		} else {
-			ms.setSTUpdated(collName, false)
 		}
 		ms.putBwOp(bwOp)
 		flushed = time.Now()

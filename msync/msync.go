@@ -185,12 +185,18 @@ func (ms *MongoSync) Run(ctx context.Context) {
 func (ms *MongoSync) runSync(ctx context.Context) {
 	// you can count this using
 	// git grep ms.routines.|grep -v _test|grep -v SyncCollections|grep -v  getOplog|grep -v runSToplog
-	ms.routines.Add(3)
-	go ms.runCtxDone(ctx) // close channels on expired context
+	ms.routines.Add(2)
 	// show avg speed of BulkWrite ops to the log
 	go ms.showSpeed(ctx) // optional, comment out if not needed
 	go ms.runFlush(ctx)  // flush signal server
 	log.Tracef("runSync running servers")
+	<-ctx.Done()
+	log.Debugf("closing channels on cancelled context")
+	close(ms.bulkWriteST)
+	close(ms.bulkWriteRT)
+	close(ms.flush)
+	close(ms.IsClean)
+	close(ms.dirty)
 	ms.routines.Wait()
 	ms.countBulkWriteRT.Wait() // wait before shutdown
 	log.Tracef("runSync shutdown")
@@ -241,15 +247,4 @@ func (ms *MongoSync) initSync(ctx context.Context) error {
 		ms.initSTOplog(ctx)
 	}
 	return nil
-}
-
-func (ms *MongoSync) runCtxDone(ctx context.Context) {
-	defer ms.routines.Done() // runCtxDone
-	<-ctx.Done()
-	log.Debugf("closing channels on cancelled context")
-	close(ms.bulkWriteST)
-	close(ms.bulkWriteRT)
-	close(ms.flush)
-	close(ms.dirty)
-	close(ms.IsClean)
 }

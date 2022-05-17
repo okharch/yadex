@@ -32,8 +32,8 @@ func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId st
 		return nil, err
 	}
 	log.Infof("%s oplog started from %v, exchange %s", trace, syncTime, ms.Name())
-	ch := make(chan bson.Raw, 1024) // need buffered to have a time before starting
-	ms.routines.Add(1)              // getOplog
+	ch := make(chan bson.Raw, 1) // need buffered to have a time before starting
+	ms.routines.Add(1)           // getOplog
 	// provide oplogST entries to the channel, closes channel upon exit
 	go func() {
 		defer func() {

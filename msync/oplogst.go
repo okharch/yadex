@@ -52,9 +52,13 @@ func (ms *MongoSync) runSToplog(ctx context.Context, oplog Oplog, collSyncId map
 	log.Trace("running SToplog")
 	for {
 		var op bson.Raw
+		var ok bool
 		select {
-		case op = <-oplog:
-		case <-time.After(time.Millisecond * 50):
+		case op, ok = <-oplog:
+			if !ok {
+				return
+			}
+		case <-time.After(time.Millisecond * 100):
 			ms.dirty <- false
 			continue
 		case <-ctx.Done():

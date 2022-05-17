@@ -78,27 +78,24 @@ func (ms *MongoSync) runRTBulkWrite(ctx context.Context) {
 
 // runSTBulkWrite serves bulkWriteST channel, waits outputClear state before call ms.BulkWriteOp(ctx, bwOp)
 func (ms *MongoSync) runSTBulkWrite(ctx context.Context) {
+	defer ms.routines.Done() // runSTBulkWrite
 	log.Trace("runSTBulkWrite")
+	lastCtxTime := time.Now()
 	for bwOp := range ms.bulkWriteST {
-		// give a chance for RT channel
-		for {
-			// if it takes less than 1ms for countBulkWriteRT.Wait(),
-			// then consider RT channel is not busy
-			// and we can proceed with ST bulkWrite
-			waitNext := time.Now().Add(time.Millisecond * 5)
-			ms.countBulkWriteRT.Wait() // runSTBulkWrite wait for RT writes
-			if time.Now().Before(waitNext) {
-				break
+		if ctx.Err() != nil {
+			if time.Since(lastCtxTime) > time.Second {
+				log.Debug("runSTBulkWrite gracefully shutdown on expired context")
+				return
 			}
-			timeout := time.Millisecond * 10
-			log.Infof("wait %v to give chances to flush BulkWrite for RT: %d", timeout, ms.getPendingRTBulkWrite())
-			time.Sleep(timeout) // give chance to next RT
+			continue
 		}
+		lastCtxTime = time.Now()
+		// give a chance for RT channel
+		ms.countBulkWriteRT.Wait() // runSTBulkWrite wait for RT writes
 		ms.BulkWriteOp(ctx, bwOp)
 		ms.addSTBulkWrite(-bwOp.TotalBytes)
 	}
 	log.Debug("runSTBulkWrite gracefully shutdown on closed channel")
-	ms.routines.Done() // runSTBulkWrite
 }
 
 // putBwOp puts BulkWriteOp to either bulkWriteRT or bulkWriteST channel for BulkWrite operations.
@@ -107,7 +104,6 @@ func (ms *MongoSync) putBwOp(bwOp *BulkWriteOp) {
 		log.Tracef("putBwOp put RT %s %d(%d) records", bwOp.Coll, len(bwOp.Models), bwOp.TotalBytes)
 		ms.bulkWriteRT <- bwOp
 	} else {
-		ms.addSTBulkWrite(bwOp.TotalBytes)
 		log.Tracef("putBwOp put ST %s %d(%d) records", bwOp.Coll, len(bwOp.Models), bwOp.TotalBytes)
 		ms.bulkWriteST <- bwOp
 	}
