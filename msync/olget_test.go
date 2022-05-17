@@ -2,6 +2,7 @@ package mongosync
 
 import (
 	log "github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson"
 	"testing"
 )
@@ -42,4 +43,13 @@ func BenchmarkBsonM(b *testing.B) {
 		coll = m1["ns"].(bson.M)["coll"].(string)
 	}
 	log.Infof("coll:%s", coll)
+}
+
+func TestGetOpColl(t *testing.T) {
+	op := createOp(t, bson.M{"ns": bson.M{"coll": "test"}})
+	require.Equal(t, "test", getOpColl(op))
+	op = createOp(t, bson.M{"ns": bson.M{"coll1": "test"}})
+	require.Equal(t, "", getOpColl(op))
+	op = createOp(t, bson.M{})
+	require.Equal(t, "", getOpColl(op))
 }

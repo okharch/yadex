@@ -7,6 +7,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestGetOplog(t *testing.T) {
@@ -41,5 +42,44 @@ func TestGetOplog(t *testing.T) {
 	oid := id.ObjectID()
 	require.Equal(t, ir.InsertedID, oid)
 	cancel()
+	//require.True(t, errors.Is(ctx.Err(), context.Canceled))
+}
+
+func TestOplogDbs(t *testing.T) {
+	ctx := context.TODO()
+	ready := make(chan bool, 1)
+	ms, err := NewMongoSync(ctx, ExchCfg, ready)
+	require.NoError(t, err)
+	require.NotNil(t, ms)
+	ctx, cancel := context.WithCancel(context.TODO())
+	log.Infof("getting oplog for %s", ms.Name())
+	opCh, err := ms.getOplog(ctx, ms.Sender, "")
+	getOpTimeout := func() (timeout bool, coll string) {
+		select {
+		case op := <-opCh:
+			db, coll := getNS(op)
+			return false, db + "." + coll
+		case <-time.After(time.Second):
+			return true, ""
+		}
+	}
+	log.Info("insert into test table")
+	_, err = ms.Sender.Collection("test").InsertOne(ctx, bson.D{})
+	require.NoError(t, err)
+	timeout, coll := getOpTimeout()
+	require.False(t, timeout)
+	expect := ms.Sender.Name() + "." + "test"
+	require.Equal(t, expect, coll)
+	log.Info("insert the same client but different database")
+	db1 := "test1"
+	_, err = ms.senderClient.Database(db1).Collection("test1").InsertOne(ctx, bson.D{})
+	require.NoError(t, err)
+	timeout, coll = getOpTimeout()
+	require.True(t, timeout)
+	require.Equal(t, "", coll)
+	cancel()
+	ms.routines.Wait()
+	_, ok := <-opCh
+	require.False(t, ok, "expect channel to be closed")
 	//require.True(t, errors.Is(ctx.Err(), context.Canceled))
 }

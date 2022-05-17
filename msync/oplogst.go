@@ -99,7 +99,7 @@ func (ms *MongoSync) getCollSyncId(ctx context.Context) (minSyncId string, err e
 			log.Infof("purged %d items bookmark records from %s", dr.DeletedCount, collName)
 		}
 	} else {
-		ms.syncId.Drop(ctx)
+		_ = ms.syncId.Drop(ctx)
 	}
 	return minSyncId, nil
 }
@@ -126,6 +126,7 @@ func (ms *MongoSync) initSTOplog(ctx context.Context) {
 func (ms *MongoSync) runSToplog(ctx context.Context, oplog Oplog) {
 	defer ms.routines.Done() // runSToplog
 	// loop until context tells we are done
+	log.Trace("running SToplog")
 	for {
 		if len(oplog) == 0 {
 			ms.dirty <- false
@@ -136,7 +137,10 @@ func (ms *MongoSync) runSToplog(ctx context.Context, oplog Oplog) {
 		case <-ctx.Done():
 			return
 		}
-		collName := getCollName(op)
+		log.Tracef("got oplog %s", getOpName(op))
+		// we deal with the same db all the time,
+		// it is enough to dispatch based on collName only
+		collName := getOpColl(op)
 		if collName == "" {
 			continue
 		}
@@ -150,6 +154,7 @@ func (ms *MongoSync) runSToplog(ctx context.Context, oplog Oplog) {
 		if ok {
 			syncId := getSyncId(op)
 			if syncId < startFrom {
+				log.Tracef("oplog skipped %s as %s < %s", getOpName(op), syncId, startFrom)
 				continue
 			}
 			log.Infof("follow oplog for coll %s from %s, exchange %s", collName, syncId, ms.Name())
@@ -159,5 +164,4 @@ func (ms *MongoSync) runSToplog(ctx context.Context, oplog Oplog) {
 		ch := ms.getCollChan(ctx, collName, config, rt)
 		ch <- op
 	}
-	log.Debug("runSToplog gracefully shutdown on cancelled context")
 }

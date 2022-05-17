@@ -1,12 +1,25 @@
 package mongosync
 
 import (
+	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
+	"testing"
 )
 
-// getCollName extracts collection's name from op(log)
-func getCollName(op bson.Raw) string {
+// getNS extracts collection's name from op(log)
+func getNS(op bson.Raw) (db, coll string) {
+	doc := op.Lookup("ns")
+	if len(doc.Value) == 0 {
+		return "", ""
+	}
+	d := doc.Document()
+	db = d.Lookup("db").StringValue()
+	coll = d.Lookup("coll").StringValue()
+	return
+}
+
+func getOpColl(op bson.Raw) string {
 	return getString(op.Lookup("ns", "coll"), "")
 }
 
@@ -24,9 +37,9 @@ func getOpName(op bson.Raw) string {
 		return "nil"
 	}
 	syncId := getSyncId(op)
-	coll := getCollName(op)
+	db, coll := getNS(op)
 	opTypeName := getString(op.Lookup("operationType"), "empty op")
-	return coll + ":" + opTypeName + " @ " + syncId
+	return db + "." + coll + ":" + opTypeName + " @ " + syncId
 }
 
 // getSyncId extracts _id._data portion of op(log)
@@ -55,9 +68,9 @@ func getWriteModel(op bson.Raw) (opLogType OpLogType, model mongo.WriteModel) {
 	return opLogType, model
 }
 
-//// createOp is used by various unit tests to convert bson.M into bson.Raw
-//func createOp(t *testing.T, op bson.M) (r bson.Raw) {
-//	r, err := bson.Marshal(op)
-//	require.NoError(t, err)
-//	return
-//}
+// createOp is used by various unit tests to convert bson.M into bson.Raw
+func createOp(t *testing.T, op bson.M) (r bson.Raw) {
+	r, err := bson.Marshal(op)
+	require.NoError(t, err)
+	return
+}

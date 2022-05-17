@@ -23,7 +23,9 @@ func (ms *MongoSync) initRToplog(ctx context.Context) {
 func (ms *MongoSync) runRToplog(ctx context.Context, oplog Oplog) {
 	defer ms.routines.Done() // runRToplog
 	for op := range oplog {
-		collName := getCollName(op)
+		// we deal with the same db all the time,
+		// it is enough to dispatch based on collName only
+		collName := getOpColl(op)
 		if collName == "" {
 			continue
 		}
