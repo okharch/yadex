@@ -7,6 +7,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"time"
 )
 
 // getChangeStream tries to resume sync from last successfully committed syncId.
@@ -25,11 +26,12 @@ func getChangeStream(ctx context.Context, sender *mongo.Database, syncId string)
 
 // getOplog creates channel providing oplog ops. It triggers(
 //true) idle channel when there is not pending ops in the oplog and it isRToplog
-func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId string) (Oplog, error) {
+func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId string, syncTime time.Time, trace string) (Oplog, error) {
 	changeStream, err := getChangeStream(ctx, db, syncId)
 	if err != nil {
 		return nil, err
 	}
+	log.Infof("%s oplog started from %v, exchange %s", trace, syncTime, ms.Name())
 	ch := make(chan bson.Raw, 1024) // need buffered to have a time before starting
 	ms.routines.Add(1)              // getOplog
 	// provide oplogST entries to the channel, closes channel upon exit
@@ -44,7 +46,7 @@ func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId st
 				log.Tracef("getOplog: no pending oplog. pending buf %v pending bulkWrite %d, exchange: %s", ms.getCollUpdated(),
 					ms.getPendingBulkWrite(), ms.Name())
 				next = changeStream.Next(ctx)
-				log.Infof("oplog idle finished: %s", getOpName(changeStream.Current))
+				log.Infof("%s oplog idle finished: %s", trace, getOpName(changeStream.Current))
 			}
 			if next {
 				ch <- changeStream.Current
@@ -52,15 +54,15 @@ func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId st
 			}
 			err = ctx.Err()
 			if errors.Is(err, context.Canceled) {
-				log.Info("Process oplog gracefully shutdown")
+				log.Infof("%s oplog gracefully shutdown", trace)
 				return
 			} else if err != nil {
-				log.Errorf("shutdown oplog : can't get next oplogST entry %s", err)
+				log.Errorf("shutdown %s oplog : can't get next oplogST entry %s", trace, err)
 				return
 			}
 			err := changeStream.Err()
 			if err != nil {
-				log.Errorf("failed to get oplog entry: %s", err)
+				log.Errorf("failed to get %s oplog entry: %s", trace, err)
 				continue
 			}
 		}

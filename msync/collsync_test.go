@@ -14,8 +14,8 @@ var ExchCfg = &config.ExchangeConfig{
 	SenderURI: "mongodb://localhost:27021",
 	SenderDB:  "test",
 	ST: map[string]*config.DataSync{"test": {
-		Delay:   500,
-		Batch:   1024 * 256,
+		Delay:   200,
+		Batch:   4096,
 		Exclude: nil,
 	},
 	},
@@ -42,28 +42,33 @@ func TestSyncCollection(t *testing.T) {
 	ms, err := NewMongoSync(ctx, ExchCfg, ready)
 	require.NoError(t, err)
 	require.NotNil(t, ms)
+	// lets drop SyncId
+	require.NoError(t, ms.syncId.Drop(ctx))
 	const collName = "test"
 	const numDocs = int64(113)
-	coll := ms.Receiver.Collection(collName)
-	require.NoError(t, coll.Drop(ctx))
-	coll = ms.Sender.Collection(collName)
-	err = coll.Drop(ctx)
+	collReceiver := ms.Receiver.Collection(collName)
+	require.NoError(t, collReceiver.Drop(ctx))
+	collSender := ms.Sender.Collection(collName)
+	err = collSender.Drop(ctx)
 	require.NoError(t, err)
-	// create coll at sender
-	res, err := coll.InsertMany(ctx, CreateDocs(1, numDocs))
+	// create collSender at sender
+	res, err := collSender.InsertMany(ctx, CreateDocs(1, numDocs))
 	require.NoError(t, err)
 	require.Equal(t, numDocs, int64(len(res.InsertedIDs)))
 	err = ms.initSync(ctx)
 	require.NoError(t, err)
-	ms.routines.Add(1)
+	// need runSTBulkWrite for SyncCollection
+	ms.routines.Add(2)
+	go ms.runDirt()
 	go ms.runSTBulkWrite(ctx)
-	// run syncCollection to transfer coll from sender to receiver
+	// run syncCollection to transfer collSender from sender to receiver
 	//err = ms.syncCollection(ctx, "test", 1024*128, "!")
 	require.NoError(t, err)
-	close(ms.bulkWriteST)
+	WaitState(ms.collsSyncDone, true, "colls sync done")
+	SendState(ms.ready, true)
 	require.NoError(t, ms.WaitJobDone(time.Millisecond*500))
 	// now check what we have received at the receiver
-	count, err := ms.Receiver.Collection(collName).CountDocuments(ctx, bson.M{"_id": bson.M{"$in": res.InsertedIDs}})
+	count, err := collReceiver.CountDocuments(ctx, bson.M{"_id": bson.M{"$in": res.InsertedIDs}})
 	require.NoError(t, err)
 	require.Equal(t, numDocs, count)
 	// terminate ms sync

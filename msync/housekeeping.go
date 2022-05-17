@@ -11,9 +11,15 @@ import (
 // and all the pending buffers with updates have been flushed.
 
 func (ms *MongoSync) getPendingBulkWrite() int {
-	ms.RLock()
-	defer ms.RUnlock()
-	return ms.pendingBulkWrite
+	ms.bulkWriteMutex.RLock()
+	defer ms.bulkWriteMutex.RUnlock()
+	return ms.pendingRTBulkWrite + ms.pendingSTBulkWrite
+}
+
+func (ms *MongoSync) getPendingRTBulkWrite() int {
+	ms.bulkWriteMutex.RLock()
+	defer ms.bulkWriteMutex.RUnlock()
+	return ms.pendingRTBulkWrite
 }
 
 func (ms *MongoSync) getBWSpeed() int {
@@ -79,13 +85,13 @@ func Signal(ch chan struct{}) bool {
 // if it finds signal "non-dirty" (which it can receive from idling oplog or clean bulkwrite channel),
 // it sends flush Signal (non-blocking) in order to flush pending buffers
 func (ms *MongoSync) runDirt() {
-	defer ms.routines.Done()
-	oldDirty := true // consider it dirty at first so need to check real dirt after first clean signal
+	defer ms.routines.Done() // runDirt
+	oldDirty := true         // consider it dirty at first so need to check real dirt after first clean signal
 	for dirty := range ms.dirty {
-		//log.Tracef("runDirt : %v old %v bw %d buf %d", dirty, oldDirty, ms.getPendingBulkWrite(), ms.getCollUpdated())
 		if dirty == oldDirty {
 			continue // ignore if state have not changed
 		}
+		log.Tracef("runDirt : %v old %v bw %d buf %v", dirty, oldDirty, ms.getPendingBulkWrite(), ms.getCollUpdated())
 		if !dirty {
 			// check if it is clean indeed
 			if ms.getPendingBulkWrite() != 0 {

@@ -3,11 +3,12 @@ package mongosync
 import (
 	"context"
 	log "github.com/sirupsen/logrus"
+	"time"
 )
 
 // initRToplog just starts to follow changes from the current tail of the oplog
 func (ms *MongoSync) initRToplog(ctx context.Context) {
-	oplog, err := ms.getOplog(ctx, ms.Sender, "")
+	oplog, err := ms.getOplog(ctx, ms.Sender, "", time.Now(), "RT")
 	if err != nil {
 		log.Fatalf("failed to init RT oplog: %s", err)
 	}

@@ -13,6 +13,14 @@ func Keys[T comparable, V any](m map[T]V) []T {
 	return result
 }
 
+func MakeSet[T comparable](list []T) map[T]struct{} {
+	result := make(map[T]struct{}, len(list))
+	for _, V := range list {
+		result[V] = struct{}{}
+	}
+	return result
+}
+
 // Values returns slice with values of the map
 func Values[T comparable, V any](m map[T]V) []V {
 	result := make([]V, len(m))
@@ -40,7 +48,11 @@ func SendState[T any](state chan T, value T, traceOpt ...string) {
 	}
 	// nob-blocking clean the channel
 	select {
-	case pop := <-state:
+	case pop, ok := <-state:
+		if !ok {
+			log.Errorf("sending state on closed channel %s!", trace)
+			return
+		}
 		log.Tracef("%s: poped state %v", trace, pop)
 	default:
 	}
@@ -87,13 +99,21 @@ func GetState[T any](ch chan T) T {
 	if cap(ch) != 1 {
 		panic("channel must have capacity one!")
 	}
-	state := <-ch
+	state, ok := <-ch
+	if !ok {
+		log.Tracef("getting state from closed channel")
+		return state
+	}
 	// while it blocks to input refresh state again
 	for {
 		select {
+		case state, ok = <-ch:
+			if !ok {
+				log.Tracef("getting state from closed channel")
+				return state
+			}
 		case ch <- state:
 			return state
-		case state = <-ch:
 		}
 	}
 }

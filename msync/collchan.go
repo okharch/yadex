@@ -149,6 +149,7 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 				} else {
 					ms.setSTUpdated(collName, true)
 				}
+				log.Tracef("coll %s become dirty on op %s", collName, getOpName(op))
 				ms.dirty <- true // update buffers become dirty
 			}
 		}

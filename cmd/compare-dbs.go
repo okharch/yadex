@@ -67,7 +67,7 @@ func connectDB(ctx context.Context, name, uri, dbName string, collsRE *regexp.Re
 
 func GetCompareChan() (chan *CollCompare, *sync.WaitGroup) {
 	// lets make it buffered to allow paralel comparizon which uses all CPUs
-	threads := (runtime.NumCPU() + 1) / 2
+	threads := runtime.NumCPU()
 	if threads < 1 {
 		threads = 1
 	} else {

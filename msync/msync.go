@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 	"yadex/config"
 	"yadex/mdb"
 )
@@ -29,7 +30,6 @@ type Oplog chan bson.Raw
 const bwLogSize = 256
 
 type MongoSync struct {
-	sync.RWMutex
 	ctx                      context.Context
 	cancelFunc               context.CancelFunc
 	Sender, Receiver         *mongo.Database
@@ -41,30 +41,29 @@ type MongoSync struct {
 	Config                   *config.ExchangeConfig
 	routines                 sync.WaitGroup // housekeeping of runSync. it is zero on exit
 	IsClean                  chan bool      // broadcast the change of dirty state, must have capacity 1
-	ready                    chan bool      // msync is ready to process
+	ready                    chan bool      // it send true when msync is ready to process
 	dirty                    chan bool      // send true if there is any chances become dirty, send false if there is a chance to be IsClean
-
+	collBookmark             map[string]time.Time
 	// syncId collection to store sync progress bookmark for ST collections.
 	// When it starts sync session for an ST collection again it tries to resume syncing from that bookmark.
 	syncId     *mongo.Collection
 	lastSyncId string
 	// this signal is sent right before oplog requires blocking log.Next statement so before getting blocked it sends this signal.
 	idleOpLog     chan struct{}
-	oplogRT       Oplog     // follow RT changes
 	collMatch     CollMatch // config, realtime nil and false if not found
 	collChanMutex sync.RWMutex
-	collSyncId    map[string]string
-	collChan      map[string]chan<- bson.Raw // any collection has it's dedicated channel with dedicated goroutine.
+	collsSyncDone chan bool        // SyncCollections sends signal here when it is done
+	collChan      map[string]Oplog // any collection has it's dedicated channel with dedicated goroutine.
 	// checkIdle facility, see checkIdle.go
-	countBulkWriteRT     sync.WaitGroup // this is used to prevent ST BulkWrites clash over RT line
-	rtUpdated, stUpdated map[string]struct{}
-	pendingBuffers       int // pending bytes in collection's buffers
-	collBuffersMutex     sync.RWMutex
-	pendingBulkWrite     int // total of bulkWrite buffers queued at bulkWriteRT and bulkWriteST channels
-	totalBulkWrite       int // this counts total bytes flushed to the receiver
-	bulkWriteMutex       sync.RWMutex
-	bwLog                [bwLogSize]BWLog
-	bwLogIndex           int
+	countBulkWriteRT                       sync.WaitGroup // this is used to prevent ST BulkWrites clash over RT line
+	rtUpdated, stUpdated                   map[string]struct{}
+	pendingBuffers                         int // pending bytes in collection's buffers
+	collBuffersMutex                       sync.RWMutex
+	pendingSTBulkWrite, pendingRTBulkWrite int // total of bulkWrite buffers queued at bulkWriteRT and bulkWriteST channels
+	totalBulkWrite                         int // this counts total bytes flushed to the receiver
+	bulkWriteMutex                         sync.RWMutex
+	bwLog                                  [bwLogSize]BWLog
+	bwLogIndex                             int
 	// flush signal when BulkWrite channel is idling
 	flush chan struct{}
 }
@@ -128,6 +127,7 @@ func (ms *MongoSync) Run(ctx context.Context) {
 			ctx := context.TODO()
 			_ = ms.senderClient.Disconnect(ctx)
 			_ = ms.receiverClient.Disconnect(ctx)
+			exCancel()
 			return
 		case senderAvail = <-ms.senderAvailable:
 			if senderAvail {
@@ -185,37 +185,42 @@ func (ms *MongoSync) Run(ctx context.Context) {
 func (ms *MongoSync) runSync(ctx context.Context) {
 	// you can count this using
 	// git grep ms.routines.|grep -v _test|grep -v SyncCollections|grep -v  getOplog|grep -v runSToplog
-	ms.routines.Add(6)
+	ms.routines.Add(3)
 	go ms.runCtxDone(ctx) // close channels on expired context
-	go ms.runDirt()       // serve dirty channel
 	// show avg speed of BulkWrite ops to the log
 	go ms.showSpeed(ctx) // optional, comment out if not needed
-	go ms.runRTBulkWrite(ctx)
-	go ms.runSTBulkWrite(ctx)
-	go ms.runFlush(ctx) // flush signal server
+	go ms.runFlush(ctx)  // flush signal server
 	log.Tracef("runSync running servers")
 	ms.routines.Wait()
-	ms.countBulkWriteRT.Wait()
+	ms.countBulkWriteRT.Wait() // wait before shutdown
 	log.Tracef("runSync shutdown")
 }
 
-func (ms *MongoSync) initChannels() {
+func (ms *MongoSync) initChannels(ctx context.Context) {
 	ms.IsClean = make(chan bool, 1) // this is state channel, must have capacity 1
-	ms.dirty = make(chan bool)      // send false if there is a chance to be IsClean
-
-	// each collection has separate channel for receiving its events.
-	// that channel is served by dedicated goroutine
-	ms.collChan = make(map[string]chan<- bson.Raw)
-	//
-	ms.rtUpdated = make(map[string]struct{})
-	ms.stUpdated = make(map[string]struct{})
-	// get name of bookmarkColSyncid on sender
-	log.Tracef("initSync")
+	// signalling channels
+	ms.flush = make(chan struct{})
+	ms.collsSyncDone = make(chan bool, 1)
+	ms.dirty = make(chan bool) // send false if there is a chance to be IsClean
+	ms.routines.Add(1)         // runDirt
+	go ms.runDirt()            // serve dirty channel
 	// init channels before serving routines
 	ms.bulkWriteST = make(chan *BulkWriteOp)
 	ms.bulkWriteRT = make(chan *BulkWriteOp)
-	// signalling channels
-	ms.flush = make(chan struct{})
+	ms.routines.Add(2) // runRTBulkWrite, runSTBulkWrite
+	go ms.runRTBulkWrite(ctx)
+	go ms.runSTBulkWrite(ctx)
+
+	// each collection has separate channel for receiving its events.
+	// that channel is served by dedicated goroutine
+	ms.collChan = make(map[string]Oplog)
+	//
+	ms.rtUpdated = make(map[string]struct{})
+	ms.stUpdated = make(map[string]struct{})
+	ms.collBookmark = make(map[string]time.Time)
+	// get name of bookmarkColSyncid on sender
+	log.Tracef("initSync")
+
 }
 
 func (ms *MongoSync) Name() string {
@@ -227,15 +232,14 @@ func (ms *MongoSync) Name() string {
 // bwPut channel is used for signalling there is pending BulkWrite op
 // it launches serveBWChan goroutine which serves  operation from those channel and
 func (ms *MongoSync) initSync(ctx context.Context) error {
-	ms.initChannels()
 	ms.totalBulkWrite = 0
+	ms.initChannels(ctx)
 	if len(ms.Config.RT) > 0 {
 		ms.initRToplog(ctx)
 	}
 	if len(ms.Config.ST) > 0 {
 		ms.initSTOplog(ctx)
 	}
-
 	return nil
 }
 
