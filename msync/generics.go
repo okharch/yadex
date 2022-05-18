@@ -1,6 +1,9 @@
 package mongosync
 
-import log "github.com/sirupsen/logrus"
+import (
+	"context"
+	log "github.com/sirupsen/logrus"
+)
 
 // Keys returns slice with keys of the map
 func Keys[T comparable, V any](m map[T]V) []T {
@@ -104,7 +107,7 @@ func GetState[T any](ch chan T) T {
 		log.Tracef("getting state from closed channel")
 		return state
 	}
-	// while it blocks to input refresh state again
+	// while there is an input refresh state again
 	for {
 		select {
 		case state, ok = <-ch:
@@ -136,4 +139,15 @@ func Filter[T any](list []T, f func(T) bool) []T {
 		}
 	}
 	return result[:count]
+}
+
+// CancelSend waits to send value to the channel unless context expired
+// if context expired it returns true
+func CancelSend[T any](ctx context.Context, ch chan T, value T) bool {
+	select {
+	case <-ctx.Done():
+		return true
+	case ch <- value:
+		return false
+	}
 }

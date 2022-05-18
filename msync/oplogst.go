@@ -16,7 +16,7 @@ func GetRandomHex(l int) string {
 }
 
 type collSyncP struct {
-	SyncId   string    `bson:"sync_id"`  // syncId to restore syncing
+	SyncId   string    `bson:"sync_id"`  // SyncId to restore syncing
 	CollName string    `bson:"collName"` // Coll which had been flushed
 	Pending  []string  `bson:"pending"`  // pending collections at the time of flushing
 	Updated  time.Time `bson:"_id"`      // ST collection is written one at a time,
@@ -29,12 +29,13 @@ type collSyncP struct {
 // if it fails to resume from any stored sync_id it starts from current oplogST
 // and returns empty collSyncId
 func (ms *MongoSync) initSTOplog(ctx context.Context) {
-	collSyncId, minSyncId, minTime := ms.SyncCollections(ctx)
+	collSyncId, minSyncId, minTime, maxTime := ms.SyncCollections(ctx)
 	if ctx.Err() != nil {
 		return
 	}
 	// find out minimal start
-	oplog, err := ms.getOplog(ctx, ms.Sender, minSyncId, minTime, "ST")
+	oplog, err := ms.getOplog(ctx, ms.Sender, minSyncId, "ST")
+	log.Infof("ST oplog started from %v, target => %v exchange %s", minTime, maxTime, ms.Name())
 	if err != nil {
 		log.Fatalf("failed to restore oplog for ST ops: %s", err)
 	}
@@ -46,19 +47,32 @@ func (ms *MongoSync) initSTOplog(ctx context.Context) {
 // runSToplog handles incoming oplogST entries from oplogST channel.
 // it calls getCollChan to redirect oplog to channel for an ST collection.
 // If SyncId for the collection is greater than current syncId - it skips op
-func (ms *MongoSync) runSToplog(ctx context.Context, oplog Oplog, collSyncId map[string]string) {
+func (ms *MongoSync) runSToplog(ctx context.Context, oplog Oplog, collSyncId map[string]*CollBookmark) {
 	defer ms.routines.Done() // runSToplog
 	// loop until context tells we are done
 	log.Trace("running SToplog")
 	for {
 		var op bson.Raw
-		var ok bool
+		ok := true
 		select {
-		case <-ctx.Done():
-			return
 		case op, ok = <-oplog:
 			if !ok {
 				return
+			}
+		case <-time.After(time.Millisecond):
+			ok = false
+			if CancelSend(ctx, ms.dirty, false) { // before idling SToplog
+				return
+			}
+		}
+		if !ok {
+			select {
+			case <-ctx.Done():
+				return
+			case op, ok = <-oplog:
+				if !ok {
+					return
+				}
 			}
 		}
 		// log.Tracef("got oplog %s", getOpName(op))
@@ -69,9 +83,10 @@ func (ms *MongoSync) runSToplog(ctx context.Context, oplog Oplog, collSyncId map
 			continue
 		}
 
-		if sid, ok := collSyncId[collName]; ok {
+		if startAfter, ok := collSyncId[collName]; ok {
 			syncId := getSyncId(op)
-			if syncId < sid {
+			if syncId <= startAfter.SyncId {
+				log.Tracef("skipping %s due %s <= %s", collName, syncId, startAfter.SyncId)
 				continue
 			}
 			delete(collSyncId, collName)
@@ -83,6 +98,8 @@ func (ms *MongoSync) runSToplog(ctx context.Context, oplog Oplog, collSyncId map
 		}
 		// now redirect handling of op to the channel for that collection
 		collChan := ms.getCollChan(ctx, collName, config, rt)
-		collChan <- op
+		if CancelSend(ctx, collChan, op) {
+			return
+		}
 	}
 }

@@ -10,6 +10,9 @@ import (
 func (ms *MongoSync) runFlush(ctx context.Context) {
 	defer ms.routines.Done() // runFlush
 	for range ms.flush {
+		if ctx.Err() != nil {
+			return
+		}
 		ms.collBuffersMutex.RLock()
 		colls := Keys(ms.rtUpdated)
 		ms.collBuffersMutex.RUnlock()

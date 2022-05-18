@@ -13,7 +13,7 @@ import (
 
 // getCollChan returns channel of Oplog for the collection.
 // it launches goroutine which pops operation from that channel and flushes BulkWriteOp using putBWOp func
-func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *config.DataSync, realtime bool) chan<- bson.Raw {
+func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *config.DataSync, realtime bool) Oplog {
 	if ctx.Err() != nil {
 		return make(chan bson.Raw, 1) // buffered, but ignore any input
 	}
@@ -47,7 +47,7 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 			if count == 0 { // no op
 				return
 			}
-			if count < maxBatch && time.Since(flushed) < time.Millisecond*time.Duration(minFlushDelay) {
+			if totalBytes < maxBatch && time.Since(flushed) < time.Millisecond*time.Duration(minFlushDelay) {
 				return
 			}
 		}
@@ -66,16 +66,14 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 		models = nil
 		log.Tracef("flusing %s %d %d due %s", collName, count, totalBytes, reason)
 		if realtime {
+			ms.addBulkWrite(ctx, totalBytes)
 			ms.setRTUpdated(collName, false)
 		} else {
-			ms.addSTBulkWrite(totalBytes)
+			ms.addBulkWrite(ctx, totalBytes)
 			ms.setSTUpdated(collName, false)
 		}
 		totalBytes = 0
-		if ctx.Err() != nil {
-			return
-		}
-		ms.putBwOp(bwOp)
+		ms.putBwOp(ctx, bwOp)
 		flushed = time.Now()
 	}
 	// process channel of Oplog, collects similar operation to batches, flushing them to bulkWriteChan
@@ -100,17 +98,10 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 				models = nil
 				lastOp = op
 				lastOpType = opType
-				totalBytes = len(op)
+				totalBytes = 0
 				// opLogDrop flushed immediately
 				log.Tracef("coll %s flush on opLogDrop", collName)
 				flush("opLogDrop")
-				log.Tracef("coll drop, send dirty <- true")
-				if realtime {
-					ms.setRTUpdated(collName, false)
-				} else {
-					ms.setSTUpdated(collName, false)
-				}
-				ms.dirty <- true // OpLogDrop, update buffers become dirty
 				continue
 			case OpLogUnknown: // ignore op
 				log.Warnf("Operation of unknown type left unhandled:%+v", op)
@@ -150,7 +141,9 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 					ms.setSTUpdated(collName, true)
 				}
 				log.Tracef("coll %s become dirty on op %s", collName, getOpName(op))
-				ms.dirty <- true // update buffers become dirty, len(models) == 1
+				if CancelSend(ctx, ms.dirty, true) { // update buffers become dirty, len(models) == 1
+					return
+				}
 			}
 		}
 	}()

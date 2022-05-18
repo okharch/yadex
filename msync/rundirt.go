@@ -3,6 +3,7 @@ package mongosync
 import (
 	"context"
 	log "github.com/sirupsen/logrus"
+	"sync"
 	"time"
 )
 
@@ -16,11 +17,15 @@ func (ms *MongoSync) runDirt(ctx context.Context) {
 	defer ms.routines.Done() // runDirt
 	oldDirty := true         // consider it dirty at first so need to check real dirt after first clean signal
 	ssCtx, cancel := context.WithCancel(ctx)
+	var ssWait sync.WaitGroup
 	defer cancel()
 	// showStatus shows status postponed by 500ms.
 	// If new status arrives, the previous message is abandoned
 	showStatus := func(status string) {
 		cancel()
+		//log.Tracef("waiting cancelling %s", oldStatus)
+		ssWait.Wait()
+		//log.Tracef("Proceed with message %s", status)
 		ssCtx, cancel = context.WithCancel(ctx)
 		signal := status == ""
 		timeout := time.Millisecond * 500
@@ -28,8 +33,10 @@ func (ms *MongoSync) runDirt(ctx context.Context) {
 			timeout = time.Millisecond * 50
 		}
 		ms.routines.Add(1) // runDir.ShowStatus
+		ssWait.Add(1)
 		go func() {
 			defer ms.routines.Done() // runDir.ShowStatus
+			defer ssWait.Done()
 			select {
 			case <-ssCtx.Done():
 				return
@@ -43,6 +50,9 @@ func (ms *MongoSync) runDirt(ctx context.Context) {
 		}()
 	}
 	for dirty := range ms.dirty {
+		if ctx.Err() != nil {
+			return
+		}
 		if dirty == oldDirty {
 			continue // ignore if state have not changed
 		}
@@ -61,10 +71,10 @@ func (ms *MongoSync) runDirt(ctx context.Context) {
 		if dirty != oldDirty {
 			log.Tracef("sending clean: %v", !dirty)
 			SendState(ms.IsClean, !dirty)
-			if !dirty {
-				showStatus("msync idling for changes...")
-			} else {
+			if dirty {
 				showStatus("msync replicating changes...")
+			} else {
+				showStatus("msync idling for changes...")
 			}
 		}
 		oldDirty = dirty

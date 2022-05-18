@@ -13,7 +13,7 @@ import (
 func (ms *MongoSync) getPendingBulkWrite() int {
 	ms.bulkWriteMutex.RLock()
 	defer ms.bulkWriteMutex.RUnlock()
-	return ms.pendingSTBulkWrite
+	return ms.pendingBulkWrite
 }
 
 func (ms *MongoSync) getBWSpeed() int {

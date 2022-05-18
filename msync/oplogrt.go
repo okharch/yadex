@@ -4,12 +4,12 @@ import (
 	"context"
 	log "github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
-	"time"
 )
 
 // initRToplog just starts to follow changes from the current tail of the oplog
 func (ms *MongoSync) initRToplog(ctx context.Context) {
-	oplog, err := ms.getOplog(ctx, ms.Sender, "", time.Now(), "RT")
+	oplog, err := ms.getOplog(ctx, ms.Sender, "", "RT")
+	log.Infof("RT oplog started for exchange %s", ms.Name())
 	if err != nil {
 		log.Fatalf("failed to init RT oplog: %s", err)
 	}

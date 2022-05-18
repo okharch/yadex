@@ -60,7 +60,7 @@ type MongoSync struct {
 	rtUpdated, stUpdated map[string]struct{}
 	pendingBuffers       int // pending bytes in collection's buffers
 	collBuffersMutex     sync.RWMutex
-	pendingSTBulkWrite   int // total of bulkWrite buffers queued at bulkWriteST channel
+	pendingBulkWrite     int // total of bulkWrite buffers queued at bulkWriteST channel
 	totalBulkWrite       int // this counts total bytes flushed to the receiver
 	bulkWriteMutex       sync.RWMutex
 	bwLog                [bwLogSize]BWLog
@@ -192,15 +192,9 @@ func (ms *MongoSync) runSync(ctx context.Context) {
 	go ms.runFlush(ctx)  // flush signal server
 	log.Tracef("runSync running servers")
 	<-ctx.Done()
-	log.Debugf("closing channels on cancelled context")
-	close(ms.bulkWriteST)
-	close(ms.bulkWriteRT)
-	close(ms.flush)
-	close(ms.IsClean)
-	close(ms.dirty)
-	ms.routines.Wait()
+	log.Infof("waiting to shutdown sync exchange %s", ms.Name())
 	ms.countBulkWriteRT.Wait() // wait before shutdown
-	log.Tracef("runSync shutdown")
+	ms.routines.Wait()
 }
 
 func (ms *MongoSync) initChannels(ctx context.Context) {
