@@ -24,6 +24,8 @@ func createExchanges(ctx context.Context, cfg *config.Config) []*msync.MongoSync
 }
 
 var configFileName string
+var logFileName string
+var logLevel int
 
 func processCommandLine() {
 	// configFileName
@@ -31,13 +33,16 @@ func processCommandLine() {
 	if configFileName == "" {
 		configFileName = "yadex-config.yaml"
 	}
+	logFileName = os.Getenv("YADEX_LOG")
 	flag.StringVar(&configFileName, "config", configFileName, "path to config file")
+	flag.StringVar(&logFileName, "logfile", logFileName, "path to config file")
+	flag.IntVar(&logLevel, "loglevel", int(log.InfoLevel), "level from 1 to 6 (critical,error,warn,info,debug,trace))")
 	flag.Parse()
 }
 
 func main() {
-	log.SetReportCaller(true)
 	processCommandLine()
+	config.SetLogger(log.Level(logLevel), logFileName)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var waitExchanges sync.WaitGroup

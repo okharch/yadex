@@ -12,7 +12,7 @@ import (
 )
 
 func TestMakeWatchConfigChannel(t *testing.T) {
-	SetLogger(log.TraceLevel)
+	SetLogger(log.TraceLevel, "")
 	c := &Config{
 		Exchanges: []*ExchangeConfig{
 			{

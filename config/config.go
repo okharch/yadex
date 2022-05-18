@@ -172,23 +172,20 @@ func MakeWatchConfigChannel(ctx context.Context, configFileName string) chan *Co
 	return configChan
 }
 
-func SetLogger(level log.Level) {
-	dir := os.Getenv("TEMP")
-	if dir == "" {
-		dir = "C:/Temp"
-	}
-	fileName := dir + "/" + "test.log"
-	log.Infof("logging to file %s", fileName)
-	//	os.Remove(fileName)
-	f, err := os.OpenFile(fileName, os.O_CREATE|os.O_TRUNC, 0666)
-	go func() {
-		for range time.Tick(time.Second) {
-			_ = f.Sync()
+func SetLogger(level log.Level, logFile string) {
+	if logFile != "" {
+		log.Infof("logging to file %s", logFile)
+		//	os.Remove(fileName)
+		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_TRUNC, 0666)
+		if err != nil {
+			fmt.Printf("error opening file: %v", err)
 		}
-	}()
-	log.SetOutput(f)
-	if err != nil {
-		fmt.Printf("error opening file: %v", err)
+		go func() {
+			for range time.Tick(time.Second) {
+				_ = f.Sync()
+			}
+		}()
+		log.SetOutput(f)
 	}
 	log.SetLevel(level)
 	log.SetReportCaller(true)
