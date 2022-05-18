@@ -54,15 +54,12 @@ func (ms *MongoSync) runSToplog(ctx context.Context, oplog Oplog, collSyncId map
 		var op bson.Raw
 		var ok bool
 		select {
+		case <-ctx.Done():
+			return
 		case op, ok = <-oplog:
 			if !ok {
 				return
 			}
-		case <-time.After(time.Millisecond * 100):
-			ms.dirty <- false
-			continue
-		case <-ctx.Done():
-			return
 		}
 		// log.Tracef("got oplog %s", getOpName(op))
 		// we deal with the same db all the time,

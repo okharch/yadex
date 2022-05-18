@@ -39,6 +39,7 @@ func (ms *MongoSync) syncCollection(ctx context.Context, collName string, maxBul
 	totalBytes := 0
 	flush := func() {
 		totalBytes = 0
+		ms.dirty <- true // syncCollection before putBwOp
 		if len(models) == 0 {
 			return
 		}
@@ -161,6 +162,7 @@ func (ms *MongoSync) SyncCollections(ctx context.Context) (collSynced map[string
 	if len(purgeIds) != 0 {
 		ms.purgeBookmarks(ctx, purgeIds)
 	}
+	ms.dirty <- false // SyncCollections before exit
 	log.Infof("finished syncing %d collections, %d were copied, restoring oplog from %v", len(syncCollections), copied, minTime)
 	return
 }

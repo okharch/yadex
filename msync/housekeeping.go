@@ -72,44 +72,6 @@ func Signal(ch chan struct{}) bool {
 	return false
 }
 
-// runDirt serves dirty channel which triggered by various routines
-// to check if msync is dirty.
-// It finds out real state of the msync object and if it becomes changed
-// it broadcasts that change using IsClean channel
-// if it finds signal "non-dirty" (which it can receive from idling oplog or clean bulkwrite channel),
-// it sends flush Signal (non-blocking) in order to flush pending buffers
-func (ms *MongoSync) runDirt() {
-	defer ms.routines.Done() // runDirt
-	oldDirty := true         // consider it dirty at first so need to check real dirt after first clean signal
-	for dirty := range ms.dirty {
-		if dirty == oldDirty {
-			continue // ignore if state have not changed
-		}
-		log.Tracef("runDirt : %v old %v bw %d buf %v", dirty, oldDirty, ms.getPendingBulkWrite(), ms.getCollUpdated())
-		if !dirty {
-			// check if it is clean indeed
-			if ms.getPendingBulkWrite() != 0 {
-				continue // still dirty, don't change the state
-			}
-			// try to flush buffers, if they are not clean
-			if ms.getCollUpdated() {
-				Signal(ms.flush)
-				continue // still dirty, don't change the state
-			}
-		}
-		if dirty != oldDirty {
-			log.Tracef("sending clean: %v", !dirty)
-			SendState(ms.IsClean, !dirty)
-			if !dirty {
-				log.Infof("msync idling for changes...")
-			} else {
-				log.Infof("msync replicating changes...")
-			}
-		}
-		oldDirty = dirty
-	}
-}
-
 // WaitJobDone gets current ms.dirty state. If it is clean, it waits timeout if it stays clear all the time.
 // WaitJobDone is intended for unit tests.
 // it also checks ms.ready and returns error if it is not

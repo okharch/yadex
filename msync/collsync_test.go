@@ -59,7 +59,7 @@ func TestSyncCollection(t *testing.T) {
 	require.NoError(t, err)
 	// need runSTBulkWrite for SyncCollection
 	ms.routines.Add(2)
-	go ms.runDirt()
+	go ms.runDirt(ctx)
 	go ms.runSTBulkWrite(ctx)
 	// run syncCollection to transfer collSender from sender to receiver
 	//err = ms.syncCollection(ctx, "test", 1024*128, "!")

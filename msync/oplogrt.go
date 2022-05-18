@@ -3,6 +3,7 @@ package mongosync
 import (
 	"context"
 	log "github.com/sirupsen/logrus"
+	"go.mongodb.org/mongo-driver/bson"
 	"time"
 )
 
@@ -23,9 +24,13 @@ func (ms *MongoSync) initRToplog(ctx context.Context) {
 // Then it redirects oplogRT op to that channel.
 func (ms *MongoSync) runRToplog(ctx context.Context, oplog Oplog) {
 	defer ms.routines.Done() // runRToplog
-	for op := range oplog {
-		if ctx.Err() != nil {
-			continue
+	for {
+		var op bson.Raw
+		select {
+		case <-ctx.Done():
+			log.Debug("runRToplog gracefully shutdown on cancelled context")
+			return
+		case op = <-oplog:
 		}
 		// we deal with the same db all the time,
 		// it is enough to dispatch based on collName only
@@ -41,5 +46,4 @@ func (ms *MongoSync) runRToplog(ctx context.Context, oplog Oplog) {
 			ch <- op
 		}
 	}
-	log.Debug("runRToplog gracefully shutdown on cancelled context")
 }

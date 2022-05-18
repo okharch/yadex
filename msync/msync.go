@@ -42,14 +42,15 @@ type MongoSync struct {
 	routines                 sync.WaitGroup // housekeeping of runSync. it is zero on exit
 	IsClean                  chan bool      // broadcast the change of dirty state, must have capacity 1
 	ready                    chan bool      // it send true when msync is ready to process
-	dirty                    chan bool      // send true if there is any chances become dirty, send false if there is a chance to be IsClean
-	collBookmark             map[string]time.Time
+	// send true if sync becomes dirty,
+	// send false so runDirt can check  whether sync is clean
+	dirty        chan bool
+	collBookmark map[string]time.Time
 	// syncId collection to store sync progress bookmark for ST collections.
 	// When it starts sync session for an ST collection again it tries to resume syncing from that bookmark.
 	syncId     *mongo.Collection
 	lastSyncId string
 	// this signal is sent right before oplog requires blocking log.Next statement so before getting blocked it sends this signal.
-	idleOpLog     chan struct{}
 	collMatch     CollMatch // config, realtime nil and false if not found
 	collChanMutex sync.RWMutex
 	collsSyncDone chan bool        // SyncCollections sends signal here when it is done
@@ -209,7 +210,7 @@ func (ms *MongoSync) initChannels(ctx context.Context) {
 	ms.collsSyncDone = make(chan bool, 1)
 	ms.dirty = make(chan bool) // send false if there is a chance to be IsClean
 	ms.routines.Add(1)         // runDirt
-	go ms.runDirt()            // serve dirty channel
+	go ms.runDirt(ctx)         // serve dirty channel
 	// init channels before serving routines
 	ms.bulkWriteST = make(chan *BulkWriteOp)
 	ms.bulkWriteRT = make(chan *BulkWriteOp)

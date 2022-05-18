@@ -6,7 +6,6 @@ import (
 	log "github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
-	"strings"
 	"sync"
 	"time"
 	"yadex/config"
@@ -111,7 +110,7 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 				} else {
 					ms.setSTUpdated(collName, false)
 				}
-				ms.dirty <- true // update buffers become dirty
+				ms.dirty <- true // OpLogDrop, update buffers become dirty
 				continue
 			case OpLogUnknown: // ignore op
 				log.Warnf("Operation of unknown type left unhandled:%+v", op)
@@ -151,34 +150,10 @@ func (ms *MongoSync) getCollChan(ctx context.Context, collName string, config *c
 					ms.setSTUpdated(collName, true)
 				}
 				log.Tracef("coll %s become dirty on op %s", collName, getOpName(op))
-				ms.dirty <- true // update buffers become dirty
+				ms.dirty <- true // update buffers become dirty, len(models) == 1
 			}
 		}
 	}()
 
 	return ch
-}
-
-// flush sends "flush" signal to all the channels having dirty buffer
-func (ms *MongoSync) runFlush(ctx context.Context) {
-	defer ms.routines.Done() // runFlush
-	for range ms.flush {
-		ms.collBuffersMutex.RLock()
-		colls := Keys(ms.rtUpdated)
-		ms.collBuffersMutex.RUnlock()
-		log.Tracef("flusing buffers from %s...", strings.Join(colls, ", "))
-		for _, coll := range colls {
-			if ctx.Err() != nil {
-				log.Debug("runFlush gracefully shutdown on cancelled context")
-				return // otherwise, we might as well send nil to closed channel
-			}
-			ms.collChanMutex.RLock()
-			collChan, ok := ms.collChan[coll] // collChanMutex.RLock()
-			ms.collChanMutex.RUnlock()
-			if ok {
-				collChan <- nil
-			}
-		}
-	}
-	log.Debug("runFlush gracefully shutdown on closed channel")
 }
