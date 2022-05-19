@@ -36,7 +36,7 @@ func CreateDocs(start, numRecs int64) []interface{} {
 // 2. copies it to the receiver using syncCollection routine
 // 3. checks 1000 records delivered
 func TestSyncCollection(t *testing.T) {
-	config.SetLogger(log.InfoLevel)
+	config.SetLogger(log.InfoLevel, "")
 	ctx, cancel := context.WithCancel(context.TODO())
 	ready := make(chan bool, 1)
 	ms, err := NewMongoSync(ctx, ExchCfg, ready)
@@ -59,7 +59,7 @@ func TestSyncCollection(t *testing.T) {
 	require.NoError(t, err)
 	// need runSTBulkWrite for SyncCollection
 	ms.routines.Add(2)
-	go ms.runDirt(ctx)
+	go ms.runDirty(ctx)
 	go ms.runSTBulkWrite(ctx)
 	// run syncCollection to transfer collSender from sender to receiver
 	//err = ms.syncCollection(ctx, "test", 1024*128, "!")
@@ -82,7 +82,7 @@ func TestSyncCollection(t *testing.T) {
 // 3. insert another 100000 records
 // 4. sync to the receiver. This time it should be 100000 records copied, not 200000
 func TestSyncCollectionMultiple(t *testing.T) {
-	config.SetLogger(log.InfoLevel)
+	config.SetLogger(log.InfoLevel, "")
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
 	ready := make(chan bool, 1)

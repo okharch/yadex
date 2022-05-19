@@ -12,7 +12,7 @@ import (
 func TestConnection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	uri := "mongodb://127.0.0.1:27021"
+	uri := "mongodb://localhost:27021"
 	clientOpts := options.Client().ApplyURI(uri).SetDirect(true)
 	client, err := mongo.Connect(ctx, clientOpts)
 	require.NoError(t, err, "test whether regular connection works")
