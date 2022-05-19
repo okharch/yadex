@@ -36,6 +36,8 @@ func (ms *MongoSync) syncCollection(ctx context.Context, collName string, maxBul
 	updated time.Time, err error) {
 	log.Infof("cloning collection %s...", collName)
 	var models []mongo.WriteModel
+	collSyncId = GetState(syncId) // remember syncId before copying
+	updated = time.Now()
 	totalBytes := 0
 	flush := func() {
 		totalBytes = 0
@@ -46,15 +48,10 @@ func (ms *MongoSync) syncCollection(ctx context.Context, collName string, maxBul
 			return
 		}
 		log.Tracef("syncCollection flushing %d records", len(models))
-		if collSyncId == "" {
-			collSyncId = GetState(syncId)
-			updated = time.Now()
-		}
 		ms.putBwOp(ctx, &BulkWriteOp{
 			Coll:   collName,
 			OpType: OpLogUnordered,
 			Models: models,
-			SyncId: "",
 		})
 		models = nil
 	}
@@ -82,7 +79,7 @@ func (ms *MongoSync) syncCollection(ctx context.Context, collName string, maxBul
 		models = append(models, &mongo.InsertOneModel{Document: cursor.Current})
 	}
 	flush()
-	ms.WriteCollBookmark(ctx, collName, collSyncId)
+	ms.WriteCollBookmark(ctx, collName, collSyncId, updated)
 	log.Infof("sync of %s coll completed", collName)
 	return
 }
@@ -165,10 +162,10 @@ func (ms *MongoSync) SyncCollections(ctx context.Context) (collBookmark map[stri
 				cancel()
 				return
 			}
+			// we copy only ST collections which do not have a bookmark in collSyncId
 			if _, bookmarked := collBookmark[coll]; bookmarked {
 				continue
 			}
-			// we copy only ST collections which do not have a bookmark in collSyncId
 			if syncId, updated, err := ms.syncCollection(ctx, coll, cfg.Batch, syncId); err != nil {
 				log.Errorf("sync collection %s for the exchange %s failed: %s", coll, ms.Name(), err)
 			} else {

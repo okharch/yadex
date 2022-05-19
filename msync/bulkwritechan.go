@@ -144,9 +144,9 @@ func (ms *MongoSync) BulkWriteOp(ctx context.Context, bwOp *BulkWriteOp) {
 		}
 		log.Tracef("BulkWrite %s:%+v", bwOp.Coll, r)
 	}
-	// update SyncId for the collection
+	// update SyncId for the ST data
 	if !(bwOp.RealTime || bwOp.SyncId == "") {
-		ms.WriteCollBookmark(ctx, bwOp.Coll, bwOp.SyncId)
+		ms.WriteCollBookmark(ctx, bwOp.Coll, bwOp.SyncId, time.Now())
 	}
 }
 
@@ -160,7 +160,7 @@ func (ms *MongoSync) addBulkWrite(ctx context.Context, delta int) {
 	}
 	bwClean := ms.pendingBulkWrite == 0
 	ms.bulkWriteMutex.Unlock()
-	// here there is a chance we become clean, let runDirt find it out
+	// here there is a chance we become clean, let runDirty find it out
 	if bwClean {
 		log.Trace("pendingBulkWrite=0, check dirt<-false")
 		if CancelSend(ctx, ms.dirty, false) { // BulkWrite buffers are clean
@@ -169,8 +169,7 @@ func (ms *MongoSync) addBulkWrite(ctx context.Context, delta int) {
 	}
 }
 
-func (ms *MongoSync) WriteCollBookmark(ctx context.Context, collName, SyncId string) {
-	updated := time.Now()
+func (ms *MongoSync) WriteCollBookmark(ctx context.Context, collName, SyncId string, updated time.Time) {
 	doc := collSyncP{Updated: updated, SyncId: SyncId, CollName: collName}
 	// purge previous bookmarks
 	if prev, exist := ms.collBookmark[collName]; exist {
