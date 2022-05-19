@@ -7,20 +7,21 @@ import (
 	"time"
 )
 
-// runDirt serves dirty channel which triggered by various routines
+// runDirty serves dirty channel which triggered by various routines
 // to check if msync is dirty.
 // It finds out real state of the msync object and if it becomes changed
 // it broadcasts that change using IsClean channel
 // if it finds signal "non-dirty" (which it can receive from idling oplog or clean bulkwrite channel),
 // it sends flush Signal (non-blocking) in order to flush pending buffers
-func (ms *MongoSync) runDirt(ctx context.Context) {
-	defer ms.routines.Done() // runDirt
+func (ms *MongoSync) runDirty(ctx context.Context) {
+	defer ms.routines.Done() // runDirty
 	oldDirty := true         // consider it dirty at first so need to check real dirt after first clean signal
 	ssCtx, cancel := context.WithCancel(ctx)
 	var ssWait sync.WaitGroup
 	defer cancel()
 	// showStatus shows status postponed by 500ms.
 	// If new status arrives, the previous message is abandoned
+	idling := "msync idling for changes, running GC..."
 	showStatus := func(status string) {
 		cancel()
 		//log.Tracef("waiting cancelling %s", oldStatus)
@@ -28,7 +29,7 @@ func (ms *MongoSync) runDirt(ctx context.Context) {
 		//log.Tracef("Proceed with message %s", status)
 		ssCtx, cancel = context.WithCancel(ctx)
 		signal := status == ""
-		timeout := time.Millisecond * 500
+		timeout := time.Millisecond * 100
 		if signal {
 			timeout = time.Millisecond * 50
 		}
@@ -45,6 +46,9 @@ func (ms *MongoSync) runDirt(ctx context.Context) {
 					Signal(ms.flush)
 				} else {
 					log.Infof(status)
+					if status == idling {
+						//runtime.GC()
+					}
 				}
 			}
 		}()
@@ -56,7 +60,7 @@ func (ms *MongoSync) runDirt(ctx context.Context) {
 		if dirty == oldDirty {
 			continue // ignore if state have not changed
 		}
-		log.Tracef("runDirt : %v old %v bw %d buf %v", dirty, oldDirty, ms.getPendingBulkWrite(), ms.getCollUpdated())
+		log.Tracef("runDirty : %v old %v bw %d buf %v", dirty, oldDirty, ms.getPendingBulkWrite(), ms.getCollUpdated())
 		if !dirty {
 			// check if it is clean indeed
 			if ms.getPendingBulkWrite() != 0 {
@@ -74,7 +78,7 @@ func (ms *MongoSync) runDirt(ctx context.Context) {
 			if dirty {
 				showStatus("msync replicating changes...")
 			} else {
-				showStatus("msync idling for changes...")
+				showStatus(idling)
 			}
 		}
 		oldDirty = dirty

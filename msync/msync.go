@@ -43,7 +43,7 @@ type MongoSync struct {
 	IsClean                  chan bool      // broadcast the change of dirty state, must have capacity 1
 	ready                    chan bool      // it send true when msync is ready to process
 	// send true if sync becomes dirty,
-	// send false so runDirt can check  whether sync is clean
+	// send false so runDirty can check  whether sync is clean
 	dirty        chan bool
 	collBookmark map[string]time.Time
 	// syncId collection to store sync progress bookmark for ST collections.
@@ -203,8 +203,8 @@ func (ms *MongoSync) initChannels(ctx context.Context) {
 	ms.flush = make(chan struct{})
 	ms.collsSyncDone = make(chan bool, 1)
 	ms.dirty = make(chan bool) // send false if there is a chance to be IsClean
-	ms.routines.Add(1)         // runDirt
-	go ms.runDirt(ctx)         // serve dirty channel
+	ms.routines.Add(1)         // runDirty
+	go ms.runDirty(ctx)        // serve dirty channel
 	// init channels before serving routines
 	ms.bulkWriteST = make(chan *BulkWriteOp)
 	ms.bulkWriteRT = make(chan *BulkWriteOp)
