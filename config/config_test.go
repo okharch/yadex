@@ -70,7 +70,7 @@ func TestMakeWatchConfigChannel(t *testing.T) {
 	require.Greater(t, x.ST[".*"].MinDelay, x.ST[".*"].Delay)
 	require.GreaterOrEqual(t, x1.ST[".*"].Delay, x1.ST[".*"].MinDelay)
 
-	// make sure it fixes RT.Delay for Expires
+	// make sure it fixes Realtime.Delay for Expires
 	require.Greater(t, x.ST[".*"].MinDelay, x.ST[".*"].Delay)
 	require.GreaterOrEqual(t, x1.ST[".*"].Delay, x1.ST[".*"].MinDelay)
 

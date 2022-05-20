@@ -24,17 +24,6 @@ func MakeSet[T comparable](list []T) map[T]struct{} {
 	return result
 }
 
-// Values returns slice with values of the map
-func Values[T comparable, V any](m map[T]V) []V {
-	result := make([]V, len(m))
-	count := 0
-	for _, v := range m {
-		result[count] = v
-		count++
-	}
-	return result
-}
-
 // SendState is used for state channels (cap==1) to communicate state to interested clients
 func SendState[T any](state chan T, value T, traceOpt ...string) {
 	var trace string
@@ -84,18 +73,6 @@ func WaitState[T comparable](state chan T, desired T, trace string) {
 	log.Tracef("waiting %s done!", trace)
 }
 
-// ClearState drops all avlues from the channel non-blocking
-func ClearState[T any](ch chan T) {
-	for {
-		// nb read from channel until empty
-		select {
-		case <-ch:
-		default:
-			return
-		}
-	}
-}
-
 // GetState works with channel of capacity 1 to pop the value until it pops
 // and then push it back to the channel
 func GetState[T any](ch chan T) T {
@@ -107,7 +84,7 @@ func GetState[T any](ch chan T) T {
 		log.Tracef("getting state from closed channel")
 		return state
 	}
-	// while there is an input refresh state again
+	// while there is an Input refresh state again
 	for {
 		select {
 		case state, ok = <-ch:
@@ -129,21 +106,12 @@ func MapSlice[T any, V any](list []T, F func(T) V) []V {
 	return result
 }
 
-func Filter[T any](list []T, f func(T) bool) []T {
-	result := make([]T, len(list))
-	count := 0
-	for _, v := range list {
-		if f(v) {
-			result[count] = v
-			count++
-		}
-	}
-	return result[:count]
-}
-
 // CancelSend waits to send value to the channel unless context expired
 // if context expired it returns true
 func CancelSend[T any](ctx context.Context, ch chan T, value T) bool {
+	if ch == nil {
+		return true
+	}
 	select {
 	case <-ctx.Done():
 		return true

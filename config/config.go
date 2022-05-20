@@ -2,13 +2,14 @@ package config
 
 import (
 	"context"
-	"fmt"
 	"github.com/fsnotify/fsnotify"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/exp/constraints"
 	"gopkg.in/yaml.v3"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 )
@@ -18,27 +19,46 @@ const (
 	RTMinDelayDefault = 99
 	RTDelayDefault    = 100
 	STDelayDefault    = 2000
-	RTBatchDefault    = 512  // if pending RT batch reaches this size it will be flushed
+	RTBatchDefault    = 512  // if pending Realtime batch reaches this size it will be flushed
 	STBatchDefault    = 8192 // if pending ST batch reaches this size it will be flushed
 	RTExpiresDefault  = 5000 // 5 seconds this data expires, can drop batch
 	DefaultDB         = "IonM"
+	DefaultQueue      = 4096
+	DefaultCoWrite    = 3
 )
 
 type (
 	DataSync struct {
-		MinDelay int      // minimal ms delay before consequential flush of buffers
-		Delay    int      // max delay before flush
-		Batch    int      // max size before flush
-		Expires  int      // in how many ms this data expires. Expired RT Data will not be sent
-		Exclude  []string // Regexp of colls to exclude
+		// minimal ms delay before consequential flush of buffers
+		MinDelay int `yaml:"MinDelay"`
+		// max delay before flush
+		Delay int `yaml:"Delay"`
+		// max size before flush
+		Batch int `yaml:"Batch"`
+		// ms before data expires. Expired Realtime Data will not be sent
+		Expires int `yaml:"Expires"`
+		// Queue is the size of batches each collection handler can keep for BulkWrite
+		Queue int `yaml:"Queue"`
+		// Regexp of colls to exclude
+		Exclude []string `yaml:"Exclude"`
 	}
 	ExchangeConfig struct {
-		SenderURI   string
-		SenderDB    string
-		ReceiverURI string
-		ReceiverDB  string
-		RT          map[string]*DataSync
-		ST          map[string]*DataSync
+		SenderURI   string `yaml:"SenderURI"`
+		SenderDB    string `yaml:"SenderDB"`
+		ReceiverURI string `yaml:"ReceiverURI"`
+		ReceiverDB  string `yaml:"ReceiverDB"`
+		// Queue is the global default for size of queue that collection channel can keep for each collection.
+		// big values can affect memory consumption but they deliver better following oplog tail
+		// You can also specify this size for individual collections on ST/Realtime records
+		Queue int `yaml:"Queue"`
+		// number of servers for RT oplog
+		RTWorkers int `yaml:"RTWorkers"`
+		// number of servers for ST oplog
+		STWorkers int `yaml:"STWorkers"`
+		// the maximum number of allowed concurrent writes
+		CoWrite int                  `yaml:"CoWrite"`
+		RT      map[string]*DataSync `yaml:"Realtime"`
+		ST      map[string]*DataSync `yaml:"ST"`
 	}
 	Config struct {
 		Exchanges []*ExchangeConfig
@@ -49,6 +69,20 @@ func setIntDefault(v *int, d int) {
 	if *v == 0 {
 		*v = d
 	}
+}
+
+func Max[T constraints.Ordered](s ...T) T {
+	if len(s) == 0 {
+		var zero T
+		return zero
+	}
+	m := s[0]
+	for _, v := range s {
+		if m < v {
+			m = v
+		}
+	}
+	return m
 }
 
 func ReadConfig(configFile string) (*Config, error) {
@@ -71,21 +105,37 @@ func ReadConfig(configFile string) (*Config, error) {
 		if e.ReceiverDB == "" {
 			e.ReceiverDB = DefaultDB
 		}
-		// set RT defaults
+		setIntDefault(&e.CoWrite, DefaultCoWrite)
+		setIntDefault(&e.Queue, DefaultQueue)
+		workers := runtime.NumCPU()
+		if len(e.RT) == 0 {
+			e.RTWorkers = 0
+		} else {
+			e.RTWorkers = Max(workers-1, 2)
+		}
+		if len(e.ST) == 0 {
+			e.STWorkers = 0
+		} else {
+			e.STWorkers = Max(workers-e.RTWorkers, 2)
+		}
+		// set Realtime defaults
 		for key, r := range e.RT {
+			// set Delay defaults for Realtime
 			setIntDefault(&r.MinDelay, RTMinDelayDefault)
 			setIntDefault(&r.Delay, RTDelayDefault)
 			setIntDefault(&r.Expires, RTExpiresDefault)
+			setIntDefault(&r.Queue, e.Queue)
+			// fix Delays according to Expires < MinDelay < Delay
 			if r.MinDelay >= r.Expires {
-				log.Warnf("found [%d].RT.%s.MinDelay(%d) >= than Expires(%d), set to Expires-50", i, key, r.MinDelay, r.Expires)
+				log.Warnf("found [%d].Realtime.%s.MinDelay(%d) >= than Expires(%d), set to Expires-50", i, key, r.MinDelay, r.Expires)
 				r.MinDelay = r.Expires - 50
 			}
 			if r.Delay >= r.Expires {
-				log.Warnf("found [%d].RT.%s.Delay(%d) >= than Expires(%d), set to Expires-50", i, key, r.Delay, r.Expires)
+				log.Warnf("found [%d].Realtime.%s.Delay(%d) >= than Expires(%d), set to Expires-50", i, key, r.Delay, r.Expires)
 				r.Delay = r.Expires - 50
 			}
 			if r.Delay < r.MinDelay {
-				log.Warnf("found [%d].RT.%s.Delay(%d) less than MinDelay(%d), set to MinDelay", i, key, r.Delay, r.MinDelay)
+				log.Warnf("found [%d].Realtime.%s.Delay(%d) less than MinDelay(%d), set to MinDelay", i, key, r.Delay, r.MinDelay)
 				r.Delay = r.MinDelay
 			}
 			setIntDefault(&r.Batch, RTBatchDefault)
@@ -173,20 +223,6 @@ func MakeWatchConfigChannel(ctx context.Context, configFileName string) chan *Co
 }
 
 func SetLogger(level log.Level, logFile string) {
-	if logFile != "" {
-		log.Infof("logging to file %s", logFile)
-		//	os.Remove(fileName)
-		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_TRUNC, 0666)
-		if err != nil {
-			fmt.Printf("error opening file: %v", err)
-		}
-		go func() {
-			for range time.Tick(time.Second) {
-				_ = f.Sync()
-			}
-		}()
-		log.SetOutput(f)
-	}
 	log.SetLevel(level)
 	log.SetReportCaller(true)
 	Formatter := new(log.TextFormatter)
@@ -195,4 +231,20 @@ func SetLogger(level log.Level, logFile string) {
 	Formatter.FullTimestamp = true
 	//Formatter.ForceColors = true
 	log.SetFormatter(Formatter)
+	// logFile is more error prone, setup it last
+	if logFile != "" {
+		log.Infof("logging to file %s", logFile)
+		//	os.Remove(fileName)
+		f, err := os.OpenFile(logFile, os.O_CREATE|os.O_TRUNC, 0666)
+		if err != nil {
+			log.Errorf("error opening file %s: %v", logFile, err)
+			return
+		}
+		//go func() {
+		//	for range time.Tick(time.Second) {
+		//		_ = f.Sync()
+		//	}
+		//}()
+		log.SetOutput(f)
+	}
 }

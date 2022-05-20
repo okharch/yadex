@@ -2,13 +2,14 @@ package mongosync
 
 import (
 	"context"
+	"encoding/hex"
 	log "github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"math/rand"
 	"sort"
 	"time"
-	"yadex/config"
 )
 
 func fetchIds(ctx context.Context, coll *mongo.Collection) []interface{} {
@@ -32,27 +33,40 @@ func fetchIds(ctx context.Context, coll *mongo.Collection) []interface{} {
 
 // syncCollection
 // insert all the docs from sender but those which _ids found at receiver
-func (ms *MongoSync) syncCollection(ctx context.Context, collName string, maxBulkCount int, syncId chan string) (collSyncId string,
+func (ms *MongoSync) syncCollection(ctx context.Context, collData *CollData, syncId chan string) (collSyncId string,
 	updated time.Time, err error) {
+	maxBulkCount := collData.Config.Batch
+	collName := collData.CollName
 	log.Infof("cloning collection %s...", collName)
 	var models []mongo.WriteModel
 	collSyncId = GetState(syncId) // remember syncId before copying
 	updated = time.Now()
 	totalBytes := 0
+	if collData.OplogClass != olST {
+		panic("should be an ST collection!")
+	}
 	flush := func() {
-		totalBytes = 0
-		if CancelSend(ctx, ms.dirty, true) { // syncCollection before putBwOp
+		update := CollUpdate{
+			CollName:   collName,
+			OplogClass: olST,
+			Delta:      totalBytes,
+		}
+		if CancelSend(ctx, ms.collUpdate, update) { // syncCollection before putBwOp
 			return
 		}
 		if len(models) == 0 {
 			return
 		}
 		log.Tracef("syncCollection flushing %d records", len(models))
-		ms.putBwOp(ctx, &BulkWriteOp{
-			Coll:   collName,
-			OpType: OpLogUnordered,
-			Models: models,
+		_ = CancelSend(ctx, ms.bulkWrite, &BulkWriteOp{
+			Coll:       collName,
+			OplogClass: olST,
+			OpType:     OpLogUnordered,
+			Models:     models,
+			TotalBytes: totalBytes,
+			CollData:   collData,
 		})
+		totalBytes = 0
 		models = nil
 	}
 	// copy all the records which are not on the receiver yet
@@ -78,10 +92,18 @@ func (ms *MongoSync) syncCollection(ctx context.Context, collName string, maxBul
 		totalBytes += l
 		models = append(models, &mongo.InsertOneModel{Document: cursor.Current})
 	}
-	flush()
-	ms.WriteCollBookmark(ctx, collName, collSyncId, updated)
+	if totalBytes > 0 {
+		flush()
+	}
+	ms.WriteCollBookmark(ctx, collData, collSyncId, updated)
 	log.Infof("sync of %s coll completed", collName)
 	return
+}
+
+func GetRandomHex(l int) string {
+	bName := make([]byte, l)
+	rand.Read(bName)
+	return hex.EncodeToString(bName)
 }
 
 func (ms *MongoSync) triggerUpdate(ctx context.Context, syncId chan string) {
@@ -103,7 +125,7 @@ func (ms *MongoSync) getSyncIdOplog(ctx context.Context) (syncId chan string, ca
 	syncId = make(chan string, 1)
 	var eCtx context.Context
 	eCtx, cancel = context.WithCancel(ctx)
-	oplog, err := ms.getOplog(eCtx, ms.Sender, "", "LastSyncId")
+	oplog, err := ms.getOplog(eCtx, ms.Sender, "", olSyncId)
 	if err != nil {
 		log.Fatalf("failed to get oplog, perhaps it is not activated: %s", err)
 	}
@@ -130,15 +152,15 @@ func (ms *MongoSync) SyncCollections(ctx context.Context) (collBookmark map[stri
 	if err != nil {
 		log.Fatalf("critical error:failed to obtain collection list: %s", err)
 	}
-	syncCollections := make(map[string]*config.DataSync)
+	syncCollections := make(map[string]*CollData)
 	for _, coll := range colls {
-		cfg, rt := ms.collMatch(coll)
-		if !(rt || cfg == nil) {
-			syncCollections[coll] = cfg
+		collData := ms.getCollData(coll)
+		if collData.OplogClass == olST {
+			syncCollections[coll] = collData
 		}
 	}
 	// get all collections from database and clone those without sync_id
-	syncId, cancel := ms.getSyncIdOplog(ctx) // oplog to follow running changes while we syncing collections
+	syncId, stopSyncIdOplog := ms.getSyncIdOplog(ctx) // oplog to follow running changes while we syncing collections
 	var purgeIds []time.Time
 	collBookmark, purgeIds = ms.getCollBookMarks(ctx)
 	updated := true
@@ -156,17 +178,17 @@ func (ms *MongoSync) SyncCollections(ctx context.Context) (collBookmark map[stri
 			}
 		}
 		// iterate over all collections, sync those not bookmarked
-		for coll, cfg := range syncCollections {
+		for coll, collData := range syncCollections {
 			if ctx.Err() != nil {
 				log.Debug("SyncCollections gracefully shutdown on cancelled context")
-				cancel()
+				stopSyncIdOplog()
 				return
 			}
 			// we copy only ST collections which do not have a bookmark in collSyncId
 			if _, bookmarked := collBookmark[coll]; bookmarked {
 				continue
 			}
-			if syncId, updated, err := ms.syncCollection(ctx, coll, cfg.Batch, syncId); err != nil {
+			if syncId, updated, err := ms.syncCollection(ctx, collData, syncId); err != nil {
 				log.Errorf("sync collection %s for the exchange %s failed: %s", coll, ms.Name(), err)
 			} else {
 				collBookmark[coll] = &CollBookmark{
@@ -177,12 +199,9 @@ func (ms *MongoSync) SyncCollections(ctx context.Context) (collBookmark map[stri
 			}
 		}
 	}
-	cancel()
+	stopSyncIdOplog()
 	if len(purgeIds) != 0 {
 		ms.purgeBookmarks(ctx, purgeIds)
-	}
-	if CancelSend(ctx, ms.dirty, false) { // SyncCollections before exit
-		return
 	}
 	log.Infof("finished syncing %d collections, %d were copied, restoring oplog from %v", len(syncCollections), copied, minTime)
 	return
@@ -208,7 +227,7 @@ func (ms *MongoSync) getCollBookMarks(ctx context.Context) (collBookmark map[str
 		log.Errorf("failed to fetch boomark info to follow oplog: %s, dropping %s will help", err, collName)
 		return
 	}
-	var documents []collSyncP
+	var documents []CollSyncBookmark
 	if err := cur.All(ctx, &documents); err != nil {
 		log.Errorf("failed to fetch boomark info to follow oplog: %s, dropping %s will help", err, collName)
 		return
@@ -235,17 +254,17 @@ func (ms *MongoSync) getCollBookMarks(ctx context.Context) (collBookmark map[str
 		}
 		_, collFound := collBookmark[d.CollName]
 		if collFound {
-			purgeIds = append(purgeIds, d.Updated)
+			purgeIds = append(purgeIds, d.Id)
 		} else {
 			if noPending {
-				collBookmark[d.CollName] = &CollBookmark{d.Updated, maxId}
+				collBookmark[d.CollName] = &CollBookmark{d.Id, maxId}
 				continue
 			}
 			_, isPending := pending[d.CollName]
 			if isPending {
-				collBookmark[d.CollName] = &CollBookmark{d.Updated, d.SyncId}
+				collBookmark[d.CollName] = &CollBookmark{d.Id, d.SyncId}
 			} else {
-				collBookmark[d.CollName] = &CollBookmark{d.Updated, maxId}
+				collBookmark[d.CollName] = &CollBookmark{d.Id, maxId}
 			}
 		}
 		if noPending || len(d.Pending) == 0 {

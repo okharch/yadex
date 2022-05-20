@@ -57,10 +57,10 @@ func TestSyncCollection(t *testing.T) {
 	require.Equal(t, numDocs, int64(len(res.InsertedIDs)))
 	err = ms.initSync(ctx)
 	require.NoError(t, err)
-	// need runSTBulkWrite for SyncCollection
+	// need runBulkWrite for SyncCollection
 	ms.routines.Add(2)
-	go ms.runDirty(ctx)
-	go ms.runSTBulkWrite(ctx)
+	go ms.runCollUpdate(ctx)
+	go ms.runBulkWrite(ctx)
 	// run syncCollection to transfer collSender from sender to receiver
 	//err = ms.syncCollection(ctx, "test", 1024*128, "!")
 	require.NoError(t, err)
@@ -108,12 +108,12 @@ func TestSyncCollectionMultiple(t *testing.T) {
 		err = ms.initSync(ctx)
 		require.NoError(t, err)
 		ms.routines.Add(1)
-		go ms.runSTBulkWrite(ctx)
+		go ms.runBulkWrite(ctx)
 		// run syncCollection to transfer coll from sender to receiver
 		//err = ms.syncCollection(ctx, "test", 1024*128, "!")
 		require.NoError(t, err)
 		//close(ms.oplogST)
-		close(ms.bulkWriteST)
+		close(ms.bulkWrite)
 		ms.routines.Add(1)
 		require.NoError(t, ms.WaitJobDone(time.Millisecond*500))
 		// check all records inserted

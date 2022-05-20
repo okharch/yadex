@@ -2,12 +2,21 @@ package mongosync
 
 import (
 	"context"
-	"errors"
 	log "github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
+
+type OplogClass int
+
+const (
+	olRT     = 0
+	olST     = 1
+	olSyncId = 2
+)
+
+var ocName = [3]string{"RT", "ST", "SyncId"}
 
 // getChangeStream tries to resume sync from last successfully committed SyncId.
 // That id is stored for each mongo collection each time after successful write oplogST into receiver database.
@@ -23,16 +32,15 @@ func getChangeStream(ctx context.Context, sender *mongo.Database, syncId string)
 	return sender.Watch(ctx, pipeline, opts)
 }
 
-// getOplog creates channel providing oplog ops. It triggers(
-//true) idle channel when there is not pending ops in the oplog and it isRToplog
-func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId string, trace string) (Oplog,
+// provides oplog from changeStream,
+func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId string, oplogClass OplogClass) (Oplog,
 	error) {
 	changeStream, err := getChangeStream(ctx, db, syncId)
 	if err != nil {
 		return nil, err
 	}
-	ch := make(chan bson.Raw) // need buffered to have a time before starting
-	ms.routines.Add(1)        // getOplog
+	ch := make(chan bson.Raw)
+	ms.routines.Add(1) // getOplog
 	// provide oplogST entries to the channel, closes channel upon exit
 	go func() {
 		defer func() {
@@ -42,10 +50,15 @@ func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId st
 		for {
 			next := changeStream.TryNext(ctx)
 			if !next {
-				log.Tracef("getOplog: no pending oplog. pending buf %v pending bulkWrite %d, exchange: %s", ms.getCollUpdated(),
-					ms.getPendingBulkWrite(), ms.Name())
+				log.Trace("getOplog: idle")
+				onIdleCtx, onIdleCancel := context.WithCancel(ctx)
+				ms.routines.Add(1) // flushOnIdle
+				go func() {
+					ms.flushOnIdle(onIdleCtx, oplogClass)
+					ms.routines.Done() // flushOnIdle
+				}()
 				next = changeStream.Next(ctx)
-				log.Tracef("%s oplog idle finished: %s", trace, getOpName(changeStream.Current))
+				onIdleCancel()
 			}
 			if next {
 				if CancelSend(ctx, ch, changeStream.Current) {
@@ -53,18 +66,13 @@ func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId st
 				}
 				continue
 			}
-			err = ctx.Err()
-			if errors.Is(err, context.Canceled) {
-				log.Infof("%s oplog gracefully shutdown", trace)
-				return
-			} else if err != nil {
-				log.Errorf("shutdown %s oplog : can't get next oplogST entry %s", trace, err)
+			if ctx.Err() != nil {
 				return
 			}
 			err := changeStream.Err()
 			if err != nil {
-				log.Errorf("failed to get %s oplog entry: %s", trace, err)
-				continue
+				log.Errorf("failed to get %s oplog entry: %s", ocName[oplogClass], err)
+				return
 			}
 		}
 	}()

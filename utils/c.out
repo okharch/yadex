@@ -1,0 +1,17 @@
+mode: set
+yadex/utils/format.go:5.32,9.13 4 0
+yadex/utils/format.go:12.2,17.45 5 0
+yadex/utils/format.go:9.13,11.3 1 0
+yadex/utils/format.go:17.45,19.15 2 0
+yadex/utils/format.go:22.3,26.38 4 0
+yadex/utils/format.go:19.15,21.4 1 0
+yadex/utils/format.go:26.38,30.4 3 0
+yadex/utils/postpone.go:23.112,29.12 6 1
+yadex/utils/postpone.go:29.12,31.10 2 1
+yadex/utils/postpone.go:32.25,36.16 4 1
+yadex/utils/postpone.go:37.30,41.25 3 1
+yadex/utils/postpone.go:45.4,45.16 1 1
+yadex/utils/postpone.go:41.25,44.5 2 1
+yadex/utils/postpone.go:53.39,57.19 4 1
+yadex/utils/postpone.go:62.2,64.14 3 1
+yadex/utils/postpone.go:57.19,61.3 3 1

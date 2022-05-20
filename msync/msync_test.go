@@ -31,7 +31,7 @@ var cfg = &config.Config{
 
 func TestNewMongoSync(t *testing.T) {
 	// create mongoSync
-	config.SetLogger(log.InfoLevel)
+	config.SetLogger(log.InfoLevel, "")
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
 	ready := make(chan bool, 1)
@@ -50,7 +50,7 @@ func TestSync(t *testing.T) {
 	const countMany = int64(5000)
 	const countLoop = int64(10)
 	var ids []interface{}
-	config.SetLogger(log.TraceLevel)
+	config.SetLogger(log.TraceLevel, "")
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
 	ready := make(chan bool, 1)
@@ -126,7 +126,7 @@ func TestCollSync2(t *testing.T) {
 	// 6. Make sure everything synced
 	// ----------------
 	// make msync object and use tab
-	config.SetLogger(log.TraceLevel)
+	config.SetLogger(log.TraceLevel, "")
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
 	ready := make(chan bool, 1)
