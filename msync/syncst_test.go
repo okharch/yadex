@@ -57,10 +57,10 @@ func TestSyncCollection(t *testing.T) {
 	require.Equal(t, numDocs, int64(len(res.InsertedIDs)))
 	err = ms.initSync(ctx)
 	require.NoError(t, err)
+	ms.runSync(ctx)
 	// need runBulkWrite for SyncCollection
 	ms.routines.Add(2)
 	go ms.runCollUpdate(ctx)
-	go ms.runBulkWrite(ctx)
 	// run syncCollection to transfer collSender from sender to receiver
 	//err = ms.syncCollection(ctx, "test", 1024*128, "!")
 	require.NoError(t, err)

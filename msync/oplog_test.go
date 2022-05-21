@@ -18,7 +18,7 @@ func TestGetOplog(t *testing.T) {
 	require.NotNil(t, ms)
 	ctx, cancel := context.WithCancel(context.TODO())
 	log.Infof("getting oplog for %s", ms.Name())
-	opCh, err := ms.getOplog(ctx, ms.Sender, "", olST)
+	opCh, err := ms.getOplog(ctx, ms.Sender, "", OplogStored)
 	var input sync.WaitGroup
 	input.Add(1)
 	var op bson.Raw
@@ -53,7 +53,7 @@ func TestOplogDbs(t *testing.T) {
 	require.NotNil(t, ms)
 	ctx, cancel := context.WithCancel(context.TODO())
 	log.Infof("getting oplog for %s", ms.Name())
-	opCh, err := ms.getOplog(ctx, ms.Sender, "", olST)
+	opCh, err := ms.getOplog(ctx, ms.Sender, "", OplogStored)
 	getOpTimeout := func() (timeout bool, coll string) {
 		select {
 		case op := <-opCh:

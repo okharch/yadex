@@ -9,7 +9,6 @@ import (
 	"gopkg.in/yaml.v3"
 	"os"
 	"os/signal"
-	"runtime"
 	"syscall"
 	"time"
 )
@@ -51,10 +50,6 @@ type (
 		// big values can affect memory consumption but they deliver better following oplog tail
 		// You can also specify this size for individual collections on ST/Realtime records
 		Queue int `yaml:"Queue"`
-		// number of servers for RT oplog
-		RTWorkers int `yaml:"RTWorkers"`
-		// number of servers for ST oplog
-		STWorkers int `yaml:"STWorkers"`
 		// the maximum number of allowed concurrent writes
 		CoWrite int                  `yaml:"CoWrite"`
 		RT      map[string]*DataSync `yaml:"Realtime"`
@@ -85,73 +80,72 @@ func Max[T constraints.Ordered](s ...T) T {
 	return m
 }
 
+func FixExchangeConfig(i int, e *ExchangeConfig) {
+	if e.SenderDB == "" {
+		e.SenderDB = DefaultDB
+	}
+	if e.ReceiverDB == "" {
+		e.ReceiverDB = DefaultDB
+	}
+	setIntDefault(&e.CoWrite, DefaultCoWrite)
+	e.CoWrite = Max(e.CoWrite, 2)
+	setIntDefault(&e.Queue, DefaultQueue)
+	//workers := runtime.NumCPU()
+	// set Realtime defaults
+	for key, r := range e.RT {
+		// set Delay defaults for Realtime
+		setIntDefault(&r.MinDelay, RTMinDelayDefault)
+		setIntDefault(&r.Delay, RTDelayDefault)
+		setIntDefault(&r.Expires, RTExpiresDefault)
+		setIntDefault(&r.Queue, e.Queue)
+		// fix Delays according to Expires < MinDelay < Delay
+		if r.MinDelay >= r.Expires {
+			log.Warnf("found [%d].Realtime.%s.MinDelay(%d) >= than Expires(%d), set to Expires-50", i, key, r.MinDelay, r.Expires)
+			r.MinDelay = r.Expires - 50
+		}
+		if r.Delay >= r.Expires {
+			log.Warnf("found [%d].Realtime.%s.Delay(%d) >= than Expires(%d), set to Expires-50", i, key, r.Delay, r.Expires)
+			r.Delay = r.Expires - 50
+		}
+		if r.Delay < r.MinDelay {
+			log.Warnf("found [%d].Realtime.%s.Delay(%d) less than MinDelay(%d), set to MinDelay", i, key, r.Delay, r.MinDelay)
+			r.Delay = r.MinDelay
+		}
+		setIntDefault(&r.Batch, RTBatchDefault)
+	}
+	// set ST defaults
+	for key, r := range e.ST {
+		setIntDefault(&r.MinDelay, STMinDelayDefault)
+		setIntDefault(&r.Delay, STDelayDefault)
+		if r.Delay < r.MinDelay {
+			log.Warnf("found [%d].ST.%s.Delay(%d) less than MinDelay(%d), set to MinDelay", i, key, r.Delay, r.MinDelay)
+			r.Delay = r.MinDelay
+		}
+		setIntDefault(&r.Batch, STBatchDefault)
+	}
+}
+
+func FixConfig(cfg *Config) {
+	// now check empty fields to set defaults
+	for i, e := range cfg.Exchanges {
+		FixExchangeConfig(i, e)
+	}
+}
+
 func ReadConfig(configFile string) (*Config, error) {
 	data, err := os.ReadFile(configFile)
 	if err != nil {
 		return nil, errors.Wrapf(err, "was not able to get data from config file %s : %s", configFile, err)
 	}
-	var result Config
+	result := &Config{}
 	// replace tab with 4 spaces
 	// config = bytes.ReplaceAll(config,[]byte("\t"), []byte("    "))
-	err = yaml.Unmarshal(data, &result)
+	err = yaml.Unmarshal(data, result)
 	if err != nil {
 		return nil, errors.Wrapf(err, "Error parsing yaml config %s ", configFile)
 	}
-	// now check empty fields to set defaults
-	for i, e := range result.Exchanges {
-		if e.SenderDB == "" {
-			e.SenderDB = DefaultDB
-		}
-		if e.ReceiverDB == "" {
-			e.ReceiverDB = DefaultDB
-		}
-		setIntDefault(&e.CoWrite, DefaultCoWrite)
-		setIntDefault(&e.Queue, DefaultQueue)
-		workers := runtime.NumCPU()
-		if len(e.RT) == 0 {
-			e.RTWorkers = 0
-		} else {
-			e.RTWorkers = Max(workers-1, 2)
-		}
-		if len(e.ST) == 0 {
-			e.STWorkers = 0
-		} else {
-			e.STWorkers = Max(workers-e.RTWorkers, 2)
-		}
-		// set Realtime defaults
-		for key, r := range e.RT {
-			// set Delay defaults for Realtime
-			setIntDefault(&r.MinDelay, RTMinDelayDefault)
-			setIntDefault(&r.Delay, RTDelayDefault)
-			setIntDefault(&r.Expires, RTExpiresDefault)
-			setIntDefault(&r.Queue, e.Queue)
-			// fix Delays according to Expires < MinDelay < Delay
-			if r.MinDelay >= r.Expires {
-				log.Warnf("found [%d].Realtime.%s.MinDelay(%d) >= than Expires(%d), set to Expires-50", i, key, r.MinDelay, r.Expires)
-				r.MinDelay = r.Expires - 50
-			}
-			if r.Delay >= r.Expires {
-				log.Warnf("found [%d].Realtime.%s.Delay(%d) >= than Expires(%d), set to Expires-50", i, key, r.Delay, r.Expires)
-				r.Delay = r.Expires - 50
-			}
-			if r.Delay < r.MinDelay {
-				log.Warnf("found [%d].Realtime.%s.Delay(%d) less than MinDelay(%d), set to MinDelay", i, key, r.Delay, r.MinDelay)
-				r.Delay = r.MinDelay
-			}
-			setIntDefault(&r.Batch, RTBatchDefault)
-		}
-		// set ST defaults
-		for key, r := range e.ST {
-			setIntDefault(&r.MinDelay, STMinDelayDefault)
-			setIntDefault(&r.Delay, STDelayDefault)
-			if r.Delay < r.MinDelay {
-				log.Warnf("found [%d].ST.%s.Delay(%d) less than MinDelay(%d), set to MinDelay", i, key, r.Delay, r.MinDelay)
-				r.Delay = r.MinDelay
-			}
-			setIntDefault(&r.Batch, STBatchDefault)
-		}
-	}
-	return &result, nil
+	FixConfig(result)
+	return result, nil
 }
 
 // MakeWatchConfigChannel creates  channel to notify about config changes
@@ -232,6 +226,9 @@ func SetLogger(level log.Level, logFile string) {
 	//Formatter.ForceColors = true
 	log.SetFormatter(Formatter)
 	// logFile is more error prone, setup it last
+	if logFile == "" {
+		logFile = os.Getenv("YADEX_LOG")
+	}
 	if logFile != "" {
 		log.Infof("logging to file %s", logFile)
 		//	os.Remove(fileName)

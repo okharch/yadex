@@ -66,8 +66,9 @@ func TestSync(t *testing.T) {
 	require.NoError(t, receiverColl.Drop(ctx))
 	senderColl := ms.Sender.Collection(collName)
 	require.NoError(t, senderColl.Drop(ctx))
+	// start syncing
 	var wg sync.WaitGroup
-	log.Info("Staring Sync.Run")
+	log.Infof("Staring Sync.Run %s", ms.Name())
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -75,7 +76,6 @@ func TestSync(t *testing.T) {
 		ms.Run(ctx)
 		log.Info("Gracefully leaving mongoSync.Run")
 	}()
-	// start syncing
 	log.Info("waiting sync to be ready")
 	WaitState(ready, true, "sync to be ready")
 	log.Info("starting syncing")

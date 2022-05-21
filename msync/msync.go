@@ -75,6 +75,10 @@ const CollSyncIdDbName = "mongoSync"
 // NewMongoSync returns
 func NewMongoSync(ctx context.Context, exchCfg *config.ExchangeConfig, ready chan bool) (*MongoSync, error) {
 	ms := &MongoSync{Config: exchCfg}
+	config.FixExchangeConfig(1, exchCfg)
+	if exchCfg.CoWrite < 1 {
+		panic("wrong value for CoWrite!")
+	}
 	ms.Config = exchCfg
 	log.Infof("Establishing exchange %s...", ms.Name())
 	var err error
