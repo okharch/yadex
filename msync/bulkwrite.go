@@ -33,7 +33,7 @@ func (ms *MongoSync) runBulkWrite(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if bwOp.OplogClass == olRT {
+		if bwOp.OplogClass == OplogRealtime {
 			if bwOp.Expires.Before(time.Now()) {
 				log.Warnf("drop batch for coll %s (%d/%d): expired: %v<%v", bwOp.Coll, len(bwOp.Models), bwOp.TotalBytes, bwOp.Expires, time.Now())
 				continue
@@ -101,7 +101,7 @@ func (ms *MongoSync) BulkWriteOp(ctx context.Context, bwOp *BulkWriteOp) {
 		log.Tracef("BulkWrite %s:%+v", bwOp.Coll, r)
 	}
 	// update SyncId for the ST data
-	if !(bwOp.OplogClass == olRT || bwOp.SyncId == "") {
+	if !(bwOp.OplogClass == OplogRealtime || bwOp.SyncId == "") {
 		ms.WriteCollBookmark(ctx, bwOp.CollData, bwOp.SyncId, time.Now())
 	}
 }

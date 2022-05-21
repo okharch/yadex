@@ -43,7 +43,7 @@ func (ms *MongoSync) getCollInput(ctx context.Context, collData *CollData) {
 		}
 		ftCancel()
 		bwOp := &BulkWriteOp{Coll: collName, OplogClass: OplogClass, OpType: lastOpType, CollData: collData}
-		if bwOp.OplogClass == olRT {
+		if bwOp.OplogClass == OplogRealtime {
 			bwOp.Expires = time.Now().Add(time.Duration(config.Expires) * time.Millisecond)
 		} else {
 			bwOp.SyncId = getSyncId(lastOp)

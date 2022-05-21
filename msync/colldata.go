@@ -22,9 +22,9 @@ type (
 	CollMatch func(coll string) *CollData
 )
 
-// GetCollMatch returns CollMatch func which returns config and realtime params for the collection
-// it's behaviour is defined by configuration
-// if it can't find an entry matched for the collection it returns config == nil, realtime == false
+// getCollData matches collection to the OpLogClass according to configuration and returns 	*CollData .
+//It the maintains hash ms.collData to make successive calls for the collection faster
+// if it can't find an entry matched for the collection it returns config == nil
 func (ms *MongoSync) getCollData(collName string) *CollData {
 	// special case, if collName == "" - close all channels
 	// try cache first
@@ -46,8 +46,10 @@ func (ms *MongoSync) getCollData(collName string) *CollData {
 	}
 	// cache the request, so next time it will be faster
 	cdata = &CollData{CollName: collName, Config: cfg, Flushed: time.Now()}
-	if !realtime {
-		cdata.OplogClass = olST
+	if realtime {
+		cdata.OplogClass = OplogRealtime
+	} else {
+		cdata.OplogClass = OplogStored
 	}
 	ms.collDataMutex.Lock()
 	ms.collData[collName] = cdata

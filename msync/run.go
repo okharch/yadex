@@ -83,9 +83,9 @@ func (ms *MongoSync) Run(ctx context.Context) {
 func (ms *MongoSync) runSync(ctx context.Context) {
 	// you can count this using
 	// git grep ms.routines.|grep -v _test|grep -v SyncCollections|grep -v  getOplog|grep -v runSToplog
-	ms.routines.Add(1)
+	//ms.routines.Add(1)
+	//go ms.showSpeed(ctx) // optional, comment out if not needed
 	// show avg speed of BulkWrite ops to the log
-	go ms.showSpeed(ctx) // optional, comment out if not needed
 	log.Tracef("runSync running servers")
 	if len(ms.Config.RT) > 0 {
 		ms.routines.Add(1) // runRToplog
@@ -95,6 +95,7 @@ func (ms *MongoSync) runSync(ctx context.Context) {
 		ms.routines.Add(1) // runSToplog
 		go ms.runSToplog(ctx)
 	}
+	log.Tracef("runSync:waiting for the cancel context")
 	<-ctx.Done()
 	// close all input channels
 	log.Infof("waiting to shutdown sync exchange %s", ms.Name())
@@ -108,7 +109,7 @@ func (ms *MongoSync) runSync(ctx context.Context) {
 // Then it redirects oplogRT op to that channel.
 func (ms *MongoSync) runRToplog(ctx context.Context) {
 	defer ms.routines.Done() // runRToplog
-	oplog, err := ms.getOplog(ctx, ms.Sender, "", olRT)
+	oplog, err := ms.getOplog(ctx, ms.Sender, "", OplogRealtime)
 	log.Infof("Realtime oplog started for exchange %s", ms.Name())
 	if err != nil {
 		log.Fatalf("failed to init Realtime oplog: %s", err)
@@ -124,7 +125,7 @@ func (ms *MongoSync) runRToplog(ctx context.Context) {
 		if CancelSend(ctx, ms.collUpdate, CollUpdate{
 			CollName:   collName,
 			Op:         op,
-			OplogClass: olRT,
+			OplogClass: OplogRealtime,
 			Delta:      len(op),
 		}) {
 			break
@@ -142,19 +143,19 @@ func (ms *MongoSync) runRToplog(ctx context.Context) {
 // If SyncId for the collection is greater than current syncId - it skips op
 func (ms *MongoSync) runSToplog(ctx context.Context) {
 	defer ms.routines.Done() // runSToplog
+	log.Trace("runSToplog: SyncCollections")
 	collSyncId, minSyncId, minTime, maxTime := ms.SyncCollections(ctx)
 	if ctx.Err() != nil {
 		return
 	}
 	// find out minimal start
-	oplog, err := ms.getOplog(ctx, ms.Sender, minSyncId, olST)
+	log.Trace("runSToplog: getOplog")
+	oplog, err := ms.getOplog(ctx, ms.Sender, minSyncId, OplogStored)
 	log.Infof("ST oplog started from %v, target => %v exchange %s", minTime, maxTime, ms.Name())
 	if err != nil {
 		log.Fatalf("failed to restore oplog for ST ops: %s", err)
 	}
-	ms.routines.Add(1) // go ms.runSToplog
 	// loop until context tells we are done
-	log.Trace("running SToplog")
 	bmExists := len(collSyncId) > 0
 	for op := range oplog {
 		// we deal with the same db all the time,
@@ -179,7 +180,7 @@ func (ms *MongoSync) runSToplog(ctx context.Context) {
 		if CancelSend(ctx, ms.collUpdate, CollUpdate{
 			CollName:   collName,
 			Op:         op,
-			OplogClass: olST,
+			OplogClass: OplogStored,
 			Delta:      len(op),
 		}) {
 			break

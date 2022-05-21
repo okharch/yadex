@@ -11,9 +11,9 @@ import (
 type OplogClass int
 
 const (
-	olRT     = 0
-	olST     = 1
-	olSyncId = 2
+	OplogRealtime = 0
+	OplogStored   = 1
+	OplogSyncId   = 2
 )
 
 var ocName = [3]string{"RT", "ST", "SyncId"}
@@ -50,10 +50,10 @@ func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId st
 		for {
 			next := changeStream.TryNext(ctx)
 			if !next {
-				log.Trace("getOplog: idle")
 				onIdleCtx, onIdleCancel := context.WithCancel(ctx)
 				ms.routines.Add(1) // flushOnIdle
 				go func() {
+					log.Tracef("getOplog %s: idle", ocName[oplogClass])
 					ms.flushOnIdle(onIdleCtx, oplogClass)
 					ms.routines.Done() // flushOnIdle
 				}()
@@ -77,4 +77,22 @@ func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId st
 		}
 	}()
 	return ch, nil
+}
+
+func (ms *MongoSync) getSyncIdOplog(ctx context.Context) (syncId chan string, cancel context.CancelFunc) {
+	syncId = make(chan string, 1)
+	var eCtx context.Context
+	eCtx, cancel = context.WithCancel(ctx)
+	oplog, err := ms.getOplog(eCtx, ms.Sender, "", OplogSyncId)
+	if err != nil {
+		log.Fatalf("failed to get oplog, perhaps it is not activated: %s", err)
+	}
+	ms.routines.Add(1) // SyncId channel
+	go func() {
+		for op := range oplog {
+			SendState(syncId, getSyncId(op))
+		}
+		ms.routines.Done() // SyncId channel
+	}()
+	return
 }
