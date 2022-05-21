@@ -4,7 +4,6 @@ import (
 	"context"
 	log "github.com/sirupsen/logrus"
 	"time"
-	"yadex/utils"
 )
 
 // runCollUpdate serves collUpdate channel which
@@ -17,11 +16,18 @@ func (ms *MongoSync) runCollUpdate(ctx context.Context) {
 	defer ms.routines.Done() // runCollUpdate
 	totalUpdate := 0
 	oldClean := true
-	var ppeShowStatus utils.PostponeExecutor
+	var ppeShowStatus *time.Timer
 	showStatus := func(status string) {
-		ppeShowStatus.Postpone(ctx, func(ctx context.Context) {
+		if ppeShowStatus != nil {
+			ppeShowStatus.Stop()
+		}
+		ppeShowStatus = time.AfterFunc(time.Millisecond*100, func() {
+			if ctx.Err() != nil {
+				return
+			}
 			log.Info(status)
-		}, time.Millisecond*100)
+			ppeShowStatus = nil
+		})
 	}
 	// keep last CollData separately for RT and ST
 	var zCollData CollData
