@@ -25,7 +25,7 @@ func MakeSet[T comparable](list []T) map[T]struct{} {
 }
 
 // SendState is used for state channels (cap==1) to communicate state to interested clients
-func SendState[T any](state chan T, value T, traceOpt ...string) {
+func SendState[T comparable](state chan T, value T, traceOpt ...string) {
 	var trace string
 	if len(traceOpt) > 0 {
 		trace = traceOpt[0]
@@ -39,19 +39,23 @@ func SendState[T any](state chan T, value T, traceOpt ...string) {
 		panic("Capacity of state channel should be 1!")
 	}
 	// nob-blocking clean the channel
+	var oldValue T
+	var ok bool
 	select {
-	case pop, ok := <-state:
+	case oldValue, ok = <-state:
 		if !ok {
 			log.Errorf("sending state on closed channel %s!", trace)
 			return
 		}
-		log.Tracef("%s: poped state %v", trace, pop)
+		log.Tracef("%s: poped state %v", trace, oldValue)
 	default:
 	}
 	// non-blocking set the value, if it was set before us, let it be
 	select {
 	case state <- value:
-		log.Tracef("%s: set state %v", trace, value)
+		if oldValue != value {
+			log.Tracef("%s: set state %v", trace, value)
+		}
 	default:
 		log.Tracef("%s: dropped state %v", trace, value)
 	}
