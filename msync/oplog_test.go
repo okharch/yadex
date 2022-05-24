@@ -12,8 +12,7 @@ import (
 
 func TestGetOplog(t *testing.T) {
 	ctx := context.TODO()
-	ready := make(chan bool, 1)
-	ms, err := NewMongoSync(ctx, ExchCfg, ready)
+	ms, err := NewMongoSync(ctx, ExchCfg)
 	require.NoError(t, err)
 	require.NotNil(t, ms)
 	ctx, cancel := context.WithCancel(context.TODO())
@@ -29,6 +28,9 @@ func TestGetOplog(t *testing.T) {
 		log.Infof("got OpCh %s.%s %s", db, collName, getSyncId(op))
 		input.Done()
 	}()
+	timeout := time.Duration(time.Second)
+	log.Infof("sleep %v", timeout)
+	time.Sleep(timeout)
 	log.Info("insert into test table")
 	ir, err := ms.Sender.Collection("test").InsertOne(ctx, bson.D{})
 	require.NoError(t, err)
@@ -47,8 +49,7 @@ func TestGetOplog(t *testing.T) {
 
 func TestOplogDbs(t *testing.T) {
 	ctx := context.TODO()
-	ready := make(chan bool, 1)
-	ms, err := NewMongoSync(ctx, ExchCfg, ready)
+	ms, err := NewMongoSync(ctx, ExchCfg)
 	require.NoError(t, err)
 	require.NotNil(t, ms)
 	ctx, cancel := context.WithCancel(context.TODO())

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	log "github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"math/rand"
@@ -12,7 +13,7 @@ import (
 	"time"
 )
 
-type SyncBookmark = time.Time
+type SyncBookmark = primitive.DateTime
 
 var ZeroBookmark SyncBookmark
 
@@ -24,46 +25,65 @@ type CollSyncBookmark struct {
 	// hopefully it will be protection against duplicate key
 }
 
-func (ms *MongoSync) WriteCollBookmark(ctx context.Context, collData *CollData, SyncId string, updated SyncBookmark) {
-	var pending []string
-	for collName, collData := range ms.collData { // get pending collections: collData.Dirty > 0
-		collData.RLock()
-		if collData.Dirty > 0 {
-			pending = append(pending, collName)
+func (ms *MongoSync) getNewBookmarkId() primitive.DateTime {
+	id := primitive.NewDateTimeFromTime(time.Now())
+	ms.lastBookmarkIdMutex.Lock()
+	if ms.lastBookmarkId == id {
+		ms.lastBookmarkInc++
+	} else {
+		ms.lastBookmarkInc = ms.lastBookmarkInc - (id - ms.lastBookmarkId) + 1
+		if ms.lastBookmarkInc < 0 {
+			ms.lastBookmarkInc = 0
 		}
-		collData.RUnlock()
+		ms.lastBookmarkId = id
 	}
+	id += ms.lastBookmarkInc
+	ms.lastBookmarkIdMutex.Unlock()
+	return id
+}
+
+func (ms *MongoSync) WriteCollBookmark(ctx context.Context, collData *CollData, SyncId string) {
 	collName := collData.CollName
-	doc := CollSyncBookmark{Id: updated, SyncId: SyncId, CollName: collName, Pending: pending}
 	// purge previous bookmarks
-	collData.Lock()
-	defer collData.Unlock()
-	if collData.LastSyncId > SyncId {
-		// do not write this bookmark as more mature has been written before
-		return
-	}
-	collData.LastSyncId = SyncId
-	if _, err := ms.syncId.InsertOne(ctx, &doc); err != nil {
-		log.Errorf("failed to update sync_id for %s: %s", collName, err)
-		return
-	}
-	if collData.PrevBookmark != ZeroBookmark {
-		if _, err := ms.syncId.DeleteOne(ctx, bson.M{"_id": collData.PrevBookmark}); err != nil {
+	id := ms.getNewBookmarkId()
+	//getLock(&collData.RWMutex, true, collData.CollName)
+	prevBookmark := collData.PrevBookmark
+	//releaseLock(&collData.RWMutex, true, collData.CollName)
+	if prevBookmark != ZeroBookmark {
+		log.Tracef("clean previous %v %s", prevBookmark, collData.CollName)
+		if _, err := ms.syncId.DeleteOne(ctx, bson.M{"_id": prevBookmark}); err != nil {
 			log.Errorf("failed to clean sync_id(bookmark) for %s(%v): %s", collName, collData.PrevBookmark, err)
 		} else {
 			log.Tracef("purged previous bookmark for %s(%v)", collName, collData.PrevBookmark)
 		}
 	}
+	//getLock(&collData.RWMutex, false, collData.CollName)
+	collData.PrevBookmark = id
+	//releaseLock(&collData.RWMutex, false, collData.CollName)
+	log.Tracef("insert bookmark %v %s %s", id, getDiffId(SyncId), collData.CollName)
+	log.Tracef("finding pending %s", collData.CollName)
+	//getLock(&ms.pendingMutex, true, "ms.pendingMutex")
+	ms.pendingMutex.RLock()
+	pending := Keys(ms.pending)
+	ms.pendingMutex.RUnlock()
+	//releaseLock(&ms.pendingMutex, true, "ms.pendingMutex")
+	doc := CollSyncBookmark{Id: id, SyncId: SyncId, CollName: collName, Pending: pending}
+	if ir, err := ms.syncId.InsertOne(ctx, &doc); err != nil {
+		log.Errorf("failed to update sync_id for %s: %s", collName, err)
+		return
+	} else {
+		log.Tracef("put bookmark %+v %s", &doc, ir.InsertedID)
+	}
 }
 
 type CollBookmark = struct {
-	Updated SyncBookmark
+	Updated primitive.DateTime
 	SyncId  string
 }
 
 // getCollBookMarks build map[coll]CollBookmark
 // if collection is not a key, it was not synced before
-func (ms *MongoSync) getCollBookMarks(ctx context.Context) (collBookmark map[string]*CollBookmark, purgeIds []time.Time) {
+func (ms *MongoSync) getCollBookMarks(ctx context.Context) (collBookmark map[string]*CollBookmark, purgeIds []primitive.DateTime) {
 	collName := ms.syncId.Database().Name() + "." + ms.syncId.Name()
 	// fetch CollSyncId records
 	// Sort by `sync_id` field descending
@@ -126,15 +146,15 @@ func (ms *MongoSync) getCollBookMarks(ctx context.Context) (collBookmark map[str
 	return
 }
 
-func (ms *MongoSync) updateCollBookmarks(ctx context.Context, acollBookmark map[string]*CollBookmark,
-	apurgeIds []time.Time) (updated bool, collBookmark map[string]*CollBookmark, purgeIds []time.Time,
-	minSyncId, maxSyncId string, minTime, maxTime time.Time) {
+func (ms *MongoSync) updateCollBookmarks(ctx context.Context, oldCollBookmark map[string]*CollBookmark,
+	oldPurgeIds []primitive.DateTime) (updated bool, collBookmark map[string]*CollBookmark, purgeIds []primitive.DateTime,
+	minSyncId, maxSyncId string, minTime, maxTime primitive.DateTime) {
 	// now sort SyncIds
 	syncId2Coll := make(map[string][]string)
-	collBookmark = acollBookmark
-	purgeIds = apurgeIds
+	collBookmark = oldCollBookmark
+	purgeIds = oldPurgeIds
 	for coll, bm := range collBookmark {
-		if bm.Updated.After(maxTime) {
+		if bm.Updated > maxTime {
 			maxTime = bm.Updated
 		}
 		syncId2Coll[bm.SyncId] = append(syncId2Coll[bm.SyncId], coll)
@@ -146,9 +166,13 @@ func (ms *MongoSync) updateCollBookmarks(ctx context.Context, acollBookmark map[
 	for i < len(syncIds) {
 		if _, err := getChangeStream(ctx, ms.Sender, syncIds[i]); err == nil {
 			minSyncId = syncIds[i]
+			// many different colls can have the same bookmark to continue from
+			// let's find among those collection with the minimal time of update
+			// it is for show purpose only
 			colls := syncId2Coll[minSyncId]
+			minTime = collBookmark[colls[0]].Updated
 			for _, coll := range colls {
-				if minTime.Before(collBookmark[coll].Updated) {
+				if minTime > collBookmark[coll].Updated {
 					minTime = collBookmark[coll].Updated
 				}
 			}
@@ -159,7 +183,7 @@ func (ms *MongoSync) updateCollBookmarks(ctx context.Context, acollBookmark map[
 	}
 
 	if i == len(syncIds) {
-		// it means we were not be able to restore from any bookmark, let's drop it
+		// it means we were not able to restore from any bookmark, let's drop it
 		_ = ms.syncId.Drop(ctx)
 		collBookmark = make(map[string]*CollBookmark)
 		purgeIds = nil
@@ -181,7 +205,7 @@ func (ms *MongoSync) updateCollBookmarks(ctx context.Context, acollBookmark map[
 	return
 }
 
-func (ms *MongoSync) purgeBookmarks(ctx context.Context, purgeIds []time.Time) {
+func (ms *MongoSync) purgeBookmarks(ctx context.Context, purgeIds []primitive.DateTime) {
 	filter := bson.M{"_id": bson.M{"$in": purgeIds}}
 	if dr, err := ms.syncId.DeleteMany(ctx, filter); err != nil {
 		log.Errorf("faield to purge bookmark records, exchange %s", ms.Name())

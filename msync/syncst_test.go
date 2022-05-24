@@ -5,9 +5,11 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson"
+	"sync"
 	"testing"
 	"time"
 	"yadex/config"
+	logger "yadex/logger"
 )
 
 var ExchCfg = &config.ExchangeConfig{
@@ -15,7 +17,7 @@ var ExchCfg = &config.ExchangeConfig{
 	SenderDB:  "test",
 	ST: map[string]*config.DataSync{"test": {
 		Delay:   200,
-		Batch:   4096,
+		Batch:   1024 * 128,
 		Exclude: nil,
 	},
 	},
@@ -36,10 +38,9 @@ func CreateDocs(start, numRecs int64) []interface{} {
 // 2. copies it to the receiver using syncCollection routine
 // 3. checks 1000 records delivered
 func TestSyncCollection(t *testing.T) {
-	config.SetLogger(log.InfoLevel, "")
+	logger.SetLogger(log.InfoLevel, "")
 	ctx, cancel := context.WithCancel(context.TODO())
-	ready := make(chan bool, 1)
-	ms, err := NewMongoSync(ctx, ExchCfg, ready)
+	ms, err := NewMongoSync(ctx, ExchCfg)
 	require.NoError(t, err)
 	require.NotNil(t, ms)
 	// lets drop SyncId
@@ -55,25 +56,41 @@ func TestSyncCollection(t *testing.T) {
 	res, err := collSender.InsertMany(ctx, CreateDocs(1, numDocs))
 	require.NoError(t, err)
 	require.Equal(t, numDocs, int64(len(res.InsertedIDs)))
-	err = ms.initSync(ctx)
-	require.NoError(t, err)
-	ms.runSync(ctx)
-	// need runBulkWrite for SyncCollection
-	ms.routines.Add(2)
-	go ms.runCollUpdate(ctx)
-	// run syncCollection to transfer collSender from sender to receiver
-	//err = ms.syncCollection(ctx, "test", 1024*128, "!")
-	require.NoError(t, err)
-	WaitState(ms.collsSyncDone, true, "colls sync done")
-	SendState(ms.ready, true)
-	require.NoError(t, ms.WaitJobDone(time.Millisecond*500))
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ms.Run(ctx)
+	}()
+	WaitState(ms.SyncSTDone, true, "colls sync done")
 	// now check what we have received at the receiver
 	count, err := collReceiver.CountDocuments(ctx, bson.M{"_id": bson.M{"$in": res.InsertedIDs}})
 	require.NoError(t, err)
 	require.Equal(t, numDocs, count)
+	//SendState(ms.Ready, true)
+	require.NoError(t, ms.WaitJobDone(time.Millisecond*500))
 	// terminate ms sync
 	cancel()
-	//ms.routines.Wait()
+	wg.Wait()
+	// try ms.Run again
+	ctx, cancel = context.WithCancel(context.TODO())
+	ms, err = NewMongoSync(ctx, ExchCfg)
+	require.NoError(t, err)
+	require.NotNil(t, ms)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ms.Run(ctx)
+	}()
+	WaitState(ms.Ready, true, "ms.ready")
+	collReceiver = ms.Receiver.Collection(collName)
+	WaitState(ms.SyncSTDone, true, "colls sync done")
+	// now check what we have received at the receiver
+	count, err = collReceiver.CountDocuments(ctx, bson.M{"_id": bson.M{"$in": res.InsertedIDs}})
+	require.NoError(t, err)
+	require.Equal(t, numDocs, count)
+	cancel()
+	wg.Wait()
 }
 
 // TestSyncCollection2Steps test
@@ -82,11 +99,10 @@ func TestSyncCollection(t *testing.T) {
 // 3. insert another 100000 records
 // 4. sync to the receiver. This time it should be 100000 records copied, not 200000
 func TestSyncCollectionMultiple(t *testing.T) {
-	config.SetLogger(log.InfoLevel, "")
+	logger.SetLogger(log.InfoLevel, "")
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	ready := make(chan bool, 1)
-	ms, err := NewMongoSync(ctx, ExchCfg, ready)
+	ms, err := NewMongoSync(ctx, ExchCfg)
 	require.NoError(t, err)
 	require.NotNil(t, ms)
 	require.NoError(t, err)
@@ -108,12 +124,12 @@ func TestSyncCollectionMultiple(t *testing.T) {
 		err = ms.initSync(ctx)
 		require.NoError(t, err)
 		ms.routines.Add(1)
-		go ms.runBulkWrite(ctx)
+		go ms.runBulkWriteST(ctx)
 		// run syncCollection to transfer coll from sender to receiver
 		//err = ms.syncCollection(ctx, "test", 1024*128, "!")
 		require.NoError(t, err)
 		//close(ms.oplogST)
-		close(ms.bulkWrite)
+		close(ms.bulkWriteST)
 		ms.routines.Add(1)
 		require.NoError(t, ms.WaitJobDone(time.Millisecond*500))
 		// check all records inserted

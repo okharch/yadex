@@ -2,7 +2,9 @@ package mongosync
 
 import (
 	"context"
+	"fmt"
 	log "github.com/sirupsen/logrus"
+	"time"
 )
 
 // Keys returns slice with keys of the map
@@ -112,14 +114,30 @@ func MapSlice[T any, V any](list []T, F func(T) V) []V {
 
 // CancelSend waits to send value to the channel unless context expired
 // if context expired it returns true
-func CancelSend[T any](ctx context.Context, ch chan T, value T) bool {
+func CancelSend[T any](ctx context.Context, ch chan T, value T, traces ...string) bool {
+	var trace string
+	if len(traces) > 0 {
+		trace = traces[0]
+	}
 	if ch == nil {
+		log.Warnf("can't send on %s: channel is nil", trace)
 		return true
+	}
+	// checks whether we can send immediately
+	s := hashValue([]byte(fmt.Sprintf("%+v", value)))
+	select {
+	case <-ctx.Done():
+		return true
+	case ch <- value:
+		return false
+	case <-time.After(time.Millisecond * 20):
+		log.Tracef("chan %s %s full, waiting to put value %s", trace, showChan(ch), s)
 	}
 	select {
 	case <-ctx.Done():
 		return true
 	case ch <- value:
+		log.Tracef("put value %s to chan %s %s", s, trace, showChan(ch))
 		return false
 	}
 }

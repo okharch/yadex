@@ -6,6 +6,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"sync"
 )
 
 type OplogClass int
@@ -50,23 +51,32 @@ func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId st
 		for {
 			next := changeStream.TryNext(ctx)
 			if !next {
+				//SendState(ms.OplogIdle[oplogClass], true)
 				onIdleCtx, onIdleCancel := context.WithCancel(ctx)
 				ms.routines.Add(1) // flushOnIdle
+				var waitIdle sync.WaitGroup
+				waitIdle.Add(1)
 				go func() {
-					log.Tracef("getOplog %s: idle", ocName[oplogClass])
 					ms.flushOnIdle(onIdleCtx, oplogClass)
 					ms.routines.Done() // flushOnIdle
+					waitIdle.Done()
 				}()
+
+				log.Infof("getOplog %s: idle", ocName[oplogClass])
 				next = changeStream.Next(ctx)
 				onIdleCancel()
+				waitIdle.Wait()
+				log.Infof("getOplog %s: run %s", ocName[oplogClass], getOpColl(changeStream.Current))
 			}
 			if next {
-				if CancelSend(ctx, ch, changeStream.Current) {
+				//log.Tracef("oplog:%s", getOpName(changeStream.Current))
+				if CancelSend(ctx, ch, changeStream.Current, "oplog"+ocName[oplogClass]) {
 					return
 				}
 				continue
 			}
 			if ctx.Err() != nil {
+				log.Tracef("leaving oplog %s due cancelled context ", ocName[oplogClass])
 				return
 			}
 			err := changeStream.Err()

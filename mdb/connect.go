@@ -21,9 +21,15 @@ func ConnectMongo(ctx context.Context, uri string) (client *mongo.Client, availa
 		TopologyDescriptionChanged: func(changedEvent *event.TopologyDescriptionChangedEvent) {
 			servers := changedEvent.NewDescription.Servers
 			avail := false
-			for _, server := range servers {
-				if server.AverageRTTSet {
-					avail = true
+			for i := 1; i < 3; i++ {
+				time.Sleep(time.Millisecond * 20)
+				for _, server := range servers {
+					if server.AverageRTTSet {
+						avail = true
+						break
+					}
+				}
+				if avail {
 					break
 				}
 			}

@@ -4,6 +4,7 @@ import (
 	"context"
 	log "github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"time"
@@ -31,38 +32,35 @@ func fetchIds(ctx context.Context, coll *mongo.Collection) []interface{} {
 // syncCollection
 // insert all the docs from sender but those which _ids found at receiver
 func (ms *MongoSync) syncCollection(ctx context.Context, collData *CollData, syncId chan string) (collSyncId string,
-	updated time.Time, err error) {
+	updated primitive.DateTime, err error) {
 	maxBulkCount := collData.Config.Batch
 	collName := collData.CollName
 	log.Infof("cloning collection %s...", collName)
 	var models []mongo.WriteModel
 	collSyncId = GetState(syncId) // remember syncId before copying
-	updated = time.Now()
+	updated = primitive.NewDateTimeFromTime(time.Now())
 	totalBytes := 0
 	if collData.OplogClass != OplogStored {
 		panic("should be an ST collection!")
 	}
 	flush := func() {
-		update := CollUpdate{
-			CollName:   collName,
-			OplogClass: OplogStored,
-			Delta:      totalBytes,
-		}
-		if CancelSend(ctx, ms.collUpdate, update) { // syncCollection before putBwOp
-			return
-		}
 		if len(models) == 0 {
 			return
 		}
+		//getLock(&collData.RWMutex, false, collData.CollName)
+		collData.Lock()
+		collData.Dirty += totalBytes
+		collData.Unlock()
+		//releaseLock(&collData.RWMutex, false, collData.CollName)
 		log.Tracef("syncCollection flushing %d records", len(models))
-		_ = CancelSend(ctx, ms.bulkWrite, &BulkWriteOp{
+		_ = CancelSend(ctx, ms.bulkWriteST, &BulkWriteOp{
 			Coll:       collName,
 			OplogClass: OplogStored,
 			OpType:     OpLogUnordered,
 			Models:     models,
 			TotalBytes: totalBytes,
 			CollData:   collData,
-		})
+		}, "BulkWriteST")
 		totalBytes = 0
 		models = nil
 	}
@@ -92,7 +90,7 @@ func (ms *MongoSync) syncCollection(ctx context.Context, collData *CollData, syn
 	if totalBytes > 0 {
 		flush()
 	}
-	ms.WriteCollBookmark(ctx, collData, collSyncId, updated)
+	ms.WriteCollBookmark(ctx, collData, collSyncId)
 	log.Infof("sync of %s coll completed", collName)
 	return
 }
@@ -104,13 +102,16 @@ func (ms *MongoSync) syncCollection(ctx context.Context, collData *CollData, syn
 // it returns nil if it was able to clone all the collections
 // successfully into chBulkWriteOps channels
 func (ms *MongoSync) SyncCollections(ctx context.Context) (collBookmark map[string]*CollBookmark, minSyncId string,
-	minTime, maxTime time.Time) {
+	minTime, maxTime primitive.DateTime) {
 	// here we clone those collections which does not have sync_id
+	defer SendState(ms.SyncSTDone, true)
+	SendState(ms.SyncSTDone, false)
 	colls, err := ms.Sender.ListCollectionNames(ctx, allRecords)
 	if err != nil {
-		log.Fatalf("critical error:failed to obtain collection list: %s", err)
+		log.Errorf("critical error:failed to obtain collection list: %s", err)
+		return
 	}
-	log.Tracef("runSToplog: creating list of colls: %v", colls)
+	log.Tracef("runSToplog: creating list of colls: %d", len(colls))
 	syncCollections := make(map[string]*CollData)
 	for _, coll := range colls {
 		collData := ms.getCollData(coll)
@@ -124,7 +125,7 @@ func (ms *MongoSync) SyncCollections(ctx context.Context) (collBookmark map[stri
 	log.Trace("runSToplog: getSyncIdOplog")
 	// get all collections from database and clone those without sync_id
 	syncId, stopSyncIdOplog := ms.getSyncIdOplog(ctx) // oplog to follow running changes while we syncing collections
-	var purgeIds []time.Time
+	var purgeIds []primitive.DateTime
 	collBookmark, purgeIds = ms.getCollBookMarks(ctx)
 	updated := true
 	copied := 0

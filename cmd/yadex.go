@@ -7,17 +7,17 @@ import (
 	"os"
 	"sync"
 	"yadex/config"
+	"yadex/logger"
 	msync "yadex/msync"
 )
 
 func createExchanges(ctx context.Context, cfg *config.Config) []*msync.MongoSync {
-	makeMSync := func(s *config.ExchangeConfig) *msync.MongoSync {
-		ready := make(chan bool, 1)
-		ms, err := msync.NewMongoSync(ctx, s, ready)
+	makeMSync := func(exchangeConfig *config.ExchangeConfig) *msync.MongoSync {
+		ms, err := msync.NewMongoSync(ctx, exchangeConfig)
 		if err != nil {
-			log.Errorf("Failed to establish sync %s", ms.Name())
-			return nil
+			log.Fatalf("Failed to establish sync %s", ms.Name())
 		}
+		log.Tracef("exchange %s has been created", ms.Name())
 		return ms
 	}
 	return msync.MapSlice(cfg.Exchanges, makeMSync)
@@ -42,9 +42,9 @@ func processCommandLine() {
 
 func main() {
 	processCommandLine()
-	config.SetLogger(log.Level(logLevel), logFileName)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	logger.SetLogger(log.Level(logLevel), logFileName)
+	var ctx context.Context
+	var cancel context.CancelFunc
 	var waitExchanges sync.WaitGroup
 	stopExchanges := func() {
 		if ctx == nil {
@@ -62,6 +62,7 @@ func main() {
 		stopExchanges()
 		// create new exchanges from Cfg
 		ctx, cancel = context.WithCancel(context.Background())
+		log.Trace("creating exchanges...")
 		mss := createExchanges(ctx, cfg)
 		for _, ms := range mss {
 			if ms == nil {

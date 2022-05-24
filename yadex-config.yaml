@@ -1,0 +1,10 @@
+exchanges:
+  - SenderURI: mongodb://localhost:27021
+    SenderDB: IonM
+    ReceiverURI: mongodb://localhost:27023
+    ReceiverDB: IonM
+    CoWrite: 3
+    ST:
+        .*:
+            Delay: 1000
+            Batch: 1000000

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 	"yadex/config"
+	"yadex/logger"
 	"yadex/utils"
 )
 
@@ -19,53 +20,22 @@ var cfg = &config.Config{
 			SenderDB:    "test",
 			ReceiverURI: "mongodb://localhost:27023",
 			ReceiverDB:  "test",
+			CoWrite:     2,
 			ST: map[string]*config.DataSync{".*": {
-				Delay:   99,
-				Batch:   1024 * 64, // bytes
-				Exclude: []string{"realtime"},
+				MinDelay: 100,
+				Delay:    500,
+				Batch:    1024 * 256, // bytes
+				Exclude:  []string{"realtime"},
 			},
 			},
 		},
 	},
 }
 
-func TestNewMongoSync(t *testing.T) {
-	// create mongoSync
-	config.SetLogger(log.InfoLevel, "")
-	ctx, cancel := context.WithCancel(context.TODO())
-	defer cancel()
-	ready := make(chan bool, 1)
-	ms, err := NewMongoSync(ctx, cfg.Exchanges[0], ready)
+func GetSyncReady(t *testing.T, ctx context.Context) (*MongoSync, *sync.WaitGroup) {
+	ms, err := NewMongoSync(ctx, cfg.Exchanges[0])
 	require.Nil(t, err)
 	require.NotNil(t, ms)
-	// wait for possible oplogST processing
-}
-
-// TestSync test
-// 1. insert N records
-// 2. sync to the receiver
-// 3. insert another N records
-// 4. sync to the receiver. This time it should be N records copied, not N*2
-func TestSync(t *testing.T) {
-	const countMany = int64(5000)
-	const countLoop = int64(10)
-	var ids []interface{}
-	config.SetLogger(log.TraceLevel, "")
-	ctx, cancel := context.WithCancel(context.TODO())
-	defer cancel()
-	ready := make(chan bool, 1)
-	ms, err := NewMongoSync(ctx, ExchCfg, ready)
-	// drop sync bookmarks, test senderColl @ sender & receiver
-	require.NoError(t, err)
-	require.NotNil(t, ms)
-	log.Infof("dropping MSync bookmarks")
-	require.NoError(t, ms.syncId.Drop(ctx))
-	const collName = "test"
-	receiverColl := ms.Receiver.Collection(collName)
-	log.Infof("Dropping %s collection @ receiver and sender ", collName)
-	require.NoError(t, receiverColl.Drop(ctx))
-	senderColl := ms.Sender.Collection(collName)
-	require.NoError(t, senderColl.Drop(ctx))
 	// start syncing
 	var wg sync.WaitGroup
 	log.Infof("Staring Sync.Run %s", ms.Name())
@@ -76,8 +46,45 @@ func TestSync(t *testing.T) {
 		ms.Run(ctx)
 		log.Info("Gracefully leaving mongoSync.Run")
 	}()
-	log.Info("waiting sync to be ready")
-	WaitState(ready, true, "sync to be ready")
+	log.Info("waiting sync to be Ready")
+	WaitState(ms.Ready, true, "sync to be Ready")
+	return ms, &wg
+}
+
+func TestNewMongoSync(t *testing.T) {
+	// create mongoSync
+	logger.SetLogger(log.InfoLevel, "")
+	ctx, cancel := context.WithCancel(context.TODO())
+	//defer cancel()
+	ms, wg := GetSyncReady(t, ctx)
+	require.NotNil(t, ms)
+	require.NotNil(t, wg)
+	cancel()
+	log.Info("Checking cancel facility...")
+	wg.Wait()
+}
+
+// TestSync test
+// 1. insert N records
+// 2. sync to the receiver
+// 3. insert another N records
+// 4. sync to the receiver. This time it should be N records copied, not N*2
+func TestSync(t *testing.T) {
+	const countMany = int64(50)
+	const countLoop = int64(2)
+	var ids []interface{}
+	logger.SetLogger(log.TraceLevel, "")
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+	log.Infof("dropping MSync bookmarks")
+	ms, wg := GetSyncReady(t, ctx)
+	require.NoError(t, ms.syncId.Drop(ctx))
+	const collName = "test"
+	receiverColl := ms.Receiver.Collection(collName)
+	log.Infof("Dropping %s collection @ receiver and sender ", collName)
+	require.NoError(t, receiverColl.Drop(ctx))
+	senderColl := ms.Sender.Collection(collName)
+	require.NoError(t, senderColl.Drop(ctx))
 	log.Info("starting syncing")
 	started := time.Now()
 	var filter interface{}
@@ -106,7 +113,8 @@ func TestSync(t *testing.T) {
 		ids = append(ids, ir.InsertedIDs...)
 		//time.Sleep(time.Millisecond * 50)
 	}
-	require.NoError(t, ms.WaitJobDone(time.Second*5))
+	log.Infof("Waiting InsertMany(%d) to arrive at the receiver %s", countMany*countLoop, ms.Name())
+	require.NoError(t, ms.WaitJobDone(time.Second))
 	c, err = receiverColl.CountDocuments(ctx, bson.M{"_id": bson.M{"$in": ids}})
 	require.NoError(t, err)
 	require.Equal(t, countMany*countLoop, c)
@@ -126,11 +134,10 @@ func TestCollSync2(t *testing.T) {
 	// 6. Make sure everything synced
 	// ----------------
 	// make msync object and use tab
-	config.SetLogger(log.TraceLevel, "")
+	logger.SetLogger(log.TraceLevel, "")
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
-	ready := make(chan bool, 1)
-	ms, err := NewMongoSync(ctx, ExchCfg, ready)
+	ms, err := NewMongoSync(ctx, ExchCfg)
 	// drop sync bookmarks, can be evil over time
 	require.NoError(t, err)
 	require.NotNil(t, ms)

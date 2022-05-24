@@ -1,0 +1,34 @@
+{
+	"Exchanges": [
+		{
+			"SenderURI": "mongodb://localhost:27021",
+			"SenderDB": "IonM",
+			"ReceiverURI": "mongodb://localhost:27023",
+			"ReceiverDB": "IonM",
+			"Queue": 0,
+			"CoWrite": 3,
+			"RT": {
+				"realtime": {
+					"MinDelay": 0,
+					"Delay": 100,
+					"Batch": 100,
+					"Expires": 0,
+					"Queue": 0,
+					"Exclude": null
+				}
+			},
+			"ST": {
+				".*": {
+					"MinDelay": 0,
+					"Delay": 1000,
+					"Batch": 500,
+					"Expires": 0,
+					"Queue": 0,
+					"Exclude": [
+						"realtime"
+					]
+				}
+			}
+		}
+	]
+}

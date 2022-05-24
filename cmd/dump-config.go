@@ -18,6 +18,7 @@ func main() {
 				SenderDB:    "IonM",
 				ReceiverURI: "mongodb://localhost:27023",
 				ReceiverDB:  "IonM",
+				CoWrite:     3,
 				RT: map[string]*config.DataSync{"realtime": {
 					Delay:   100,
 					Batch:   100,
@@ -31,24 +32,24 @@ func main() {
 				},
 				},
 			},
-			{
-				SenderURI:   "mongodb://localhost:27021",
-				SenderDB:    "IonM",
-				ReceiverURI: "mongodb://localhost:27024",
-				ReceiverDB:  "IonM",
-				RT: map[string]*config.DataSync{"realtime": {
-					Delay:   100,
-					Batch:   500,
-					Exclude: nil,
-				},
-				},
-				ST: map[string]*config.DataSync{".*": {
-					Delay:   100,
-					Batch:   500,
-					Exclude: []string{"realtime"},
-				},
-				},
-			},
+			//{
+			//	SenderURI:   "mongodb://localhost:27021",
+			//	SenderDB:    "IonM",
+			//	ReceiverURI: "mongodb://localhost:27024",
+			//	ReceiverDB:  "IonM",
+			//	RT: map[string]*config.DataSync{"realtime": {
+			//		Delay:   100,
+			//		Batch:   500,
+			//		Exclude: nil,
+			//	},
+			//	},
+			//	ST: map[string]*config.DataSync{".*": {
+			//		Delay:   100,
+			//		Batch:   500,
+			//		Exclude: []string{"realtime"},
+			//	},
+			//	},
+			//},
 		},
 	}
 	b, err := yaml.Marshal(c)

@@ -1,9 +1,11 @@
 package mongosync
 
 import (
+	"bytes"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
+	"sync"
 	"testing"
 )
 
@@ -32,14 +34,43 @@ func getString(v bson.RawValue, ifEmpty string) string {
 }
 
 // getOpName shows what operation coming from oplog
+var lastId string
+var lastIdMutex sync.Mutex
+var diff [255]bool
+
+func getDiffId(newId string) string {
+	var buff bytes.Buffer
+	if newId == "" {
+		return "EMPTY"
+	}
+	lastIdMutex.Lock()
+	defer lastIdMutex.Unlock()
+	if lastId != "" {
+		for i, c := range []byte(newId) {
+			if i >= len(lastId) || c != lastId[i] {
+				diff[i] = true
+				buff.Write([]byte{c})
+			}
+		}
+	} else {
+		buff.WriteString(newId)
+	}
+	lastId = newId
+	result := buff.String()
+	if result == "" {
+		result = "SAME"
+	}
+	return result
+}
+
 func getOpName(op bson.Raw) string {
 	if op == nil {
 		return "nil"
 	}
-	syncId := getSyncId(op)
+	showId := getDiffId(getSyncId(op))
 	db, coll := getNS(op)
 	opTypeName := getString(op.Lookup("operationType"), "empty op")
-	return db + "." + coll + ":" + opTypeName + " @ " + syncId
+	return db + "." + coll + ":" + opTypeName + " @ " + showId
 }
 
 // getSyncId extracts _id._data portion of op(log)
