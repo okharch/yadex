@@ -57,16 +57,10 @@ func (ms *MongoSync) WriteCollBookmark(ctx context.Context, collData *CollData, 
 			log.Tracef("purged previous bookmark for %s(%v)", collName, collData.PrevBookmark)
 		}
 	}
-	//getLock(&collData.RWMutex, false, collData.CollName)
 	collData.PrevBookmark = id
-	//releaseLock(&collData.RWMutex, false, collData.CollName)
-	log.Tracef("insert bookmark %v %s %s", id, getDiffId(SyncId), collData.CollName)
-	log.Tracef("finding pending %s", collData.CollName)
-	//getLock(&ms.pendingMutex, true, "ms.pendingMutex")
 	ms.pendingMutex.RLock()
 	pending := Keys(ms.pending)
 	ms.pendingMutex.RUnlock()
-	//releaseLock(&ms.pendingMutex, true, "ms.pendingMutex")
 	doc := CollSyncBookmark{Id: id, SyncId: SyncId, CollName: collName, Pending: pending}
 	if ir, err := ms.syncId.InsertOne(ctx, &doc); err != nil {
 		log.Errorf("failed to update sync_id for %s: %s", collName, err)

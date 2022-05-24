@@ -59,11 +59,17 @@ func (ms *MongoSync) getCollInput(ctx context.Context, collData *CollData) Oplog
 		}
 		models = nil
 		totalBytes = 0
+		var ch chan *BulkWriteOp
 		if OplogClass == OplogRealtime {
-			_ = CancelSend(ctx, ms.bulkWriteRT, bwOp, "bulkWriteRT")
+			ch = ms.bulkWriteRT
 		} else {
-			_ = CancelSend(ctx, ms.bulkWriteST, bwOp, "bulkWriteST")
+			ch = ms.bulkWriteST
 		}
+		if ctx.Err() != nil {
+			return
+		}
+		ch <- bwOp
+		//_ = CancelSend(ctx, , bwOp, "bulkWriteRT")
 	}
 	// process channel of Oplog, collects similar operation to batches, flushing them to bulkWriteChan
 	ms.routines.Add(1) // collchan

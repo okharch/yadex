@@ -40,7 +40,7 @@ func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId st
 	if err != nil {
 		return nil, err
 	}
-	ch := make(chan bson.Raw)
+	ch := make(chan bson.Raw, 256)
 	ms.routines.Add(1) // getOplog
 	// provide oplogST entries to the channel, closes channel upon exit
 	go func() {
@@ -51,6 +51,10 @@ func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId st
 		for {
 			next := changeStream.TryNext(ctx)
 			if !next {
+				if ctx.Err() != nil {
+					log.Tracef("leaving oplog %s due cancelled context ", ocName[oplogClass])
+					return
+				}
 				//SendState(ms.OplogIdle[oplogClass], true)
 				onIdleCtx, onIdleCancel := context.WithCancel(ctx)
 				ms.routines.Add(1) // flushOnIdle
@@ -69,20 +73,7 @@ func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId st
 				log.Infof("getOplog %s: run %s", ocName[oplogClass], getOpColl(changeStream.Current))
 			}
 			if next {
-				//log.Tracef("oplog:%s", getOpName(changeStream.Current))
-				if CancelSend(ctx, ch, changeStream.Current, "oplog"+ocName[oplogClass]) {
-					return
-				}
-				continue
-			}
-			if ctx.Err() != nil {
-				log.Tracef("leaving oplog %s due cancelled context ", ocName[oplogClass])
-				return
-			}
-			err := changeStream.Err()
-			if err != nil {
-				log.Errorf("failed to get %s oplog entry: %s", ocName[oplogClass], err)
-				return
+				ch <- changeStream.Current
 			}
 		}
 	}()

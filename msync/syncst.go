@@ -53,14 +53,19 @@ func (ms *MongoSync) syncCollection(ctx context.Context, collData *CollData, syn
 		collData.Unlock()
 		//releaseLock(&collData.RWMutex, false, collData.CollName)
 		log.Tracef("syncCollection flushing %d records", len(models))
-		_ = CancelSend(ctx, ms.bulkWriteST, &BulkWriteOp{
+		bwOp := &BulkWriteOp{
 			Coll:       collName,
 			OplogClass: OplogStored,
 			OpType:     OpLogUnordered,
 			Models:     models,
 			TotalBytes: totalBytes,
 			CollData:   collData,
-		}, "BulkWriteST")
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		ms.bulkWriteST <- bwOp
+		//_ = CancelSend(ctx, ms.bulkWriteST, bwOp, "BulkWriteST")
 		totalBytes = 0
 		models = nil
 	}

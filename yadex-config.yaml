@@ -7,4 +7,4 @@ exchanges:
     ST:
         .*:
             Delay: 1000
-            Batch: 1000000
+            Batch: 2000000

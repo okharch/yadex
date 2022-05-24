@@ -167,7 +167,7 @@ func (ms *MongoSync) runSToplog(ctx context.Context) {
 			if ok {
 				syncId := getSyncId(op)
 				if syncId <= startAfter.SyncId {
-					log.Tracef("skipping %s due %s <= %s", collName, syncId, startAfter.SyncId)
+					//log.Tracef("skipping %s due %s <= %s", collName, syncId, startAfter.SyncId)
 					continue
 				}
 				delete(collSyncId, collName)
