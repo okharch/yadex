@@ -14,7 +14,7 @@ All the data in a database is split into two type of sets: RT data (Realtime dat
 It supposes that changes could be made at both the sender and the receiver. 
 
 The class of data defines the way it is synced:
-* RT sync is triggered by latest oplog events on RT data update. RT data has an expiration date. If it is expired it will not be sent to the receiver.
+* RT sync is triggered by latest [oplog](https://www.mongodb.com/docs/manual/core/replica-set-oplog/) events on RT data update. RT data has an expiration date. If it is expired it will not be sent to the receiver.
 It still waits and collects a Bulk of RT updates some RT_DELAY or until MAX_RT_BULK_SIZE achieved before flushing changes into receiver. 
 If it fails to flush those Bulk into Receiver - the changes are dropped.
 * ST sync tries hard to make sender's and receiver's ST data as equal as it gets. At the beggining it checks what ST collections has been synced before and it it sees oplog is still tracks them it skips cloning. Otherwise it clones all the records from sender to the receiver that are not already there. Then it follows oplog changes to replicate evry changes from sender to the receiver. It is intented to work 24/7 as oplog is capped collections and if it can't restore some collections changes from oplog they could be lost.
