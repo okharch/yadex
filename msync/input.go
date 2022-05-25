@@ -121,7 +121,7 @@ func (ms *MongoSync) getCollInput(ctx context.Context, collData *CollData) Oplog
 				timer = time.AfterFunc(flushDelay, func() {
 					collData.RLock()
 					if collData.Input != nil {
-						log.Tracef("flush on timer %v", flushDelay)
+						log.Tracef("flush %s on timer %v", collName, flushDelay)
 						CancelSend(ctx, collData.Input, nil) // flush on timer
 					}
 					collData.RUnlock()
