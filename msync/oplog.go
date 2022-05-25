@@ -72,6 +72,12 @@ func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId st
 				waitIdle.Wait()
 				log.Infof("getOplog %s: run %s", ocName[oplogClass], getOpColl(changeStream.Current))
 			}
+			err := changeStream.Err()
+			if err != nil {
+				// TODO: try to handle oplog lost tail error
+				log.Errorf("failed to get %s oplog entry: %s", ocName[oplogClass], err)
+				return
+			}
 			if next {
 				ch <- changeStream.Current
 			}
