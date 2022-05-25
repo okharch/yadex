@@ -182,7 +182,7 @@ func (ms *MongoSync) runSToplog(ctx context.Context) {
 			}
 			lastColl = curColl
 		}
-		ms.UpdateDirty(ctx, lastColl, len(op))
+		ms.UpdateDirty(ctx, lastColl, len(op), op)
 		lastColl.Input <- op
 	}
 }

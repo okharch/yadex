@@ -2,16 +2,17 @@ package mongosync
 
 import (
 	"context"
+	"go.mongodb.org/mongo-driver/bson"
 	"time"
 )
 
-func (ms *MongoSync) UpdateDirty(ctx context.Context, collData *CollData, delta int) {
+func (ms *MongoSync) UpdateDirty(ctx context.Context, collData *CollData, delta int, op bson.Raw) {
 	//getLock(&collData.RWMutex, false, collData.CollName)
 	collData.Lock()
 	if collData.Dirty == 0 {
 		//getLock(&ms.pendingMutex, false, "ms.pendingMutex")
 		ms.pendingMutex.Lock()
-		ms.pending[collData.CollName] = collData
+		ms.pending[collData.CollName] = getSyncId(op)
 		ms.pendingMutex.Unlock()
 		//releaseLock(&ms.pendingMutex, false, "ms.pendingMutex")
 		collData.Updated = time.Now()

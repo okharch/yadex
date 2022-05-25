@@ -66,7 +66,7 @@ type MongoSync struct {
 	lastBookmarkIdMutex             sync.Mutex
 	lastBookmarkId, lastBookmarkInc primitive.DateTime
 	pendingMutex                    sync.RWMutex
-	pending                         map[string]*CollData
+	pending                         map[string]string
 	// flushOnIdle signal when BulkWrite channel is idling
 }
 
