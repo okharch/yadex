@@ -66,7 +66,9 @@ type MongoSync struct {
 	lastBookmarkIdMutex             sync.Mutex
 	lastBookmarkId, lastBookmarkInc primitive.DateTime
 	pendingMutex                    sync.RWMutex
-	pending                         map[string]string
+	// this two channel is for keeping Pending state when BulkWrite is being done
+	ChangeColl chan ChangeColl
+	Pending    chan map[string]string
 	// flushOnIdle signal when BulkWrite channel is idling
 }
 
