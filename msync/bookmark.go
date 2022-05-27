@@ -118,7 +118,8 @@ func (ms *MongoSync) updateCollBookmarks(ctx context.Context, collBookmark map[s
 		}
 	}
 	if start == 0 {
-		return
+		// no need to update
+		return false, minSyncId, maxSyncId
 	}
 	if start == -1 {
 		// drop all bookmarks
@@ -127,8 +128,7 @@ func (ms *MongoSync) updateCollBookmarks(ctx context.Context, collBookmark map[s
 		if err != nil {
 			log.Errorf("failed to drop bookmarks: %s", err)
 		}
-		updated = true
-		return
+		return true, "", ""
 	}
 	var purgeBMs []string
 	for _, syncId := range syncIds[:start] {

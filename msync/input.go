@@ -135,7 +135,7 @@ func (ms *MongoSync) getCollInput(ctx context.Context, collData *CollData) Oplog
 			}
 
 			if len(models) == 1 {
-				ms.ChangeColl <- ChangeColl{CollName: collName, SyncId: getSyncId(op)}
+				ms.ChangeColl <- ChangeColl{CollName: collName, SyncId: getSyncId(op), Flush: true}
 				// we just put 1st item
 				// unless it is filled up to (max)maxBatch items
 				log.Tracef("coll %s become collUpdate on op %s", collName, getOpName(op))

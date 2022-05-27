@@ -1,6 +1,8 @@
 package mongosync
 
-import "context"
+import (
+	"context"
+)
 
 // this record tells ChangeColl handler to update pending collections on arrival changelog records for another collection and also it is
 //used to signal that some SyncId was flushed to mongo
@@ -14,6 +16,7 @@ type (
 		CollName  string
 		SyncId    string
 		BulkWrite bool //
+		Flush     bool // this means we should add new record to the list as we expect different count for BulkWrites
 	}
 )
 
@@ -21,6 +24,7 @@ func (ms *MongoSync) runChangeColl(ctx context.Context) {
 	defer ms.routines.Done()
 	var head, tail *CollSyncIdList
 	clean := true
+	flush := make(map[string]bool)
 	for cc := range ms.ChangeColl {
 		if ctx.Err() != nil {
 			return
@@ -61,6 +65,11 @@ func (ms *MongoSync) runChangeColl(ctx context.Context) {
 			}
 			ms.Pending <- pending
 		} else {
+			addNew, exists := flush[cc.CollName]
+			flush[cc.CollName] = cc.Flush
+			if exists && !addNew && !cc.Flush && tail != nil && tail.CollName == cc.CollName {
+				return
+			}
 			// just add new elem to the tail of the list
 			newElem := &CollSyncIdList{CollName: cc.CollName, SyncId: cc.SyncId}
 			if tail == nil {

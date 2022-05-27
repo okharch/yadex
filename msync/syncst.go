@@ -34,7 +34,6 @@ func (ms *MongoSync) syncCollection(ctx context.Context, collData *CollData, syn
 	collName := collData.CollName
 	log.Infof("cloning collection %s...", collName)
 	var models []mongo.WriteModel
-	collSyncId = GetState(syncId) // remember syncId before copying
 	totalBytes := 0
 	if collData.OplogClass != OplogStored {
 		panic("should be an ST collection!")
@@ -74,6 +73,7 @@ func (ms *MongoSync) syncCollection(ctx context.Context, collData *CollData, syn
 	if err != nil {
 		log.Errorf("clone collection %s: can't read from sender: %s", collName, err)
 	}
+	collSyncId = GetState(syncId) // remember syncId before copying
 	for cursor.Next(ctx) {
 		if ctx.Err() != nil {
 			return
@@ -89,7 +89,7 @@ func (ms *MongoSync) syncCollection(ctx context.Context, collData *CollData, syn
 		flush()
 	}
 	ms.WriteCollBookmark(ctx, collData, collSyncId)
-	log.Infof("sync of %s coll completed", collName)
+	log.Infof("sync of %s coll completed at %s", collName, collSyncId)
 	return
 }
 
@@ -133,10 +133,16 @@ func (ms *MongoSync) SyncCollections(ctx context.Context) (collBookmark map[stri
 	} else {
 		SendState(syncId, maxSyncId)
 	}
-	updated := true
 	copied := 0
-	for updated {
+	for pass := 1; true; pass++ {
+		var updated bool
 		updated, minSyncId, maxSyncId = ms.updateCollBookmarks(ctx, collBookmark)
+		if pass > 1 {
+			if !updated {
+				return
+			}
+			log.Warnf("starting pass %d to catch up for the oplog tail: consider increasing oplog size!", pass)
+		}
 		// iterate over all collections, sync those not bookmarked
 		for coll, collData := range syncCollections {
 			if ctx.Err() != nil {
@@ -161,6 +167,7 @@ func (ms *MongoSync) SyncCollections(ctx context.Context) (collBookmark map[stri
 	return
 }
 
+// it works during SyncCollections, it updates pending collections so BookMark collections is kept intact
 func (ms *MongoSync) getSyncIdOplog(ctx context.Context) (syncId chan string, cancel context.CancelFunc) {
 	syncId = make(chan string, 1)
 	var eCtx context.Context
@@ -173,6 +180,7 @@ func (ms *MongoSync) getSyncIdOplog(ctx context.Context) (syncId chan string, ca
 	go func() {
 		for op := range oplog {
 			SendState(syncId, getSyncId(op))
+			ms.ChangeColl <- ChangeColl{CollName: getOpColl(op), SyncId: getSyncId(op)}
 		}
 		ms.routines.Done() // SyncId channel
 	}()

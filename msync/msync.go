@@ -25,13 +25,6 @@ type Oplog chan bson.Raw
 
 const bwLogSize = 256
 
-type CollUpdate struct {
-	CollName   string
-	Op         bson.Raw
-	OplogClass OplogClass
-	Delta      int
-}
-
 type MongoSync struct {
 	ctx               context.Context
 	cancelFunc        context.CancelFunc
