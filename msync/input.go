@@ -2,7 +2,6 @@ package mongosync
 
 import (
 	"context"
-	"fmt"
 	log "github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -25,18 +24,27 @@ func (ms *MongoSync) getCollInput(ctx context.Context, collData *CollData) Oplog
 	id := 0
 	// buffer for BulkWrite
 	maxBatch := config.Batch
+	lastFlushed := time.Now()
 	flushDelay := time.Duration(config.Delay) * time.Millisecond
 	log.Tracef("coll %s flush size %d", collName, maxBatch)
 	var models []mongo.WriteModel
 	lastOpType := OpLogUnknown
 	var lastOp bson.Raw
 	totalBytes := 0
-	timer := time.AfterFunc(time.Hour, func() {})
 	// flush bulkWriteST models or drop operation into BulkWrite channel
-	flush := func(reason string) {
-		timer.Stop()
+	flush := func(closeInput bool) {
+		log.Infof("Input.flush %v", closeInput)
 		if ctx.Err() != nil {
 			return
+		}
+		// close input channel if required
+		if closeInput {
+			timerOn := <-collData.flushTimerOn // test whether timer is reset
+			if timerOn && collData.Input != nil {
+				close(collData.Input)
+				collData.Input = nil
+			}
+			collData.flushTimerOn <- false // flush timer finished
 		}
 		count := len(models)
 		//log.Tracef("data for flush: %s %d %d", collName, totalBytes, len(models))
@@ -59,16 +67,17 @@ func (ms *MongoSync) getCollInput(ctx context.Context, collData *CollData) Oplog
 		}
 		models = nil
 		totalBytes = 0
-		var ch chan *BulkWriteOp
+		var bwChan chan *BulkWriteOp
 		if OplogClass == OplogRealtime {
-			ch = ms.bulkWriteRT
+			bwChan = ms.bulkWriteRT
 		} else {
-			ch = ms.bulkWriteST
+			bwChan = ms.bulkWriteST
 		}
 		if ctx.Err() != nil {
 			return
 		}
-		ch <- bwOp
+		lastFlushed = time.Now() // after sending buffer to BulkWrite
+		bwChan <- bwOp
 		//_ = CancelSend(ctx, , bwOp, "bulkWriteRT")
 	}
 	// process channel of Oplog, collects similar operation to batches, flushing them to bulkWriteChan
@@ -77,9 +86,19 @@ func (ms *MongoSync) getCollInput(ctx context.Context, collData *CollData) Oplog
 		defer ms.routines.Done() // colchan
 		for op := range input {
 			if op == nil {
-				// this is from timer (go <-time.After(maxFlushDelay))
+				// this is from flushTimer (go <-time.After(maxFlushDelay))
 				// or from flushOnIdle
-				flush("timeout/flushUpdate")
+				d := flushDelay - time.Since(lastFlushed)
+				collData.flushTimer.Stop()
+				<-collData.flushTimerOn
+				collData.flushTimerOn <- false // reset previous timer
+				<-collData.flushTimerOn
+				collData.flushTimerOn <- true // set flush timer
+				if d < 0 {
+					flush(true)
+				} else {
+					collData.flushTimer.Reset(d)
+				}
 				continue
 			}
 			lenOp := len(op)
@@ -89,7 +108,7 @@ func (ms *MongoSync) getCollInput(ctx context.Context, collData *CollData) Oplog
 			case OpLogOrdered, OpLogUnordered:
 				if lastOpType != opType && (lastOpType == OpLogOrdered || lastOpType == OpLogUnordered) {
 					log.Tracef("coll %s flushOnIdle on opLogOrder %v", collName, opType)
-					flush("changed OpLoOrder")
+					flush(false)
 				}
 			case OpLogDrop:
 				models = nil
@@ -100,7 +119,7 @@ func (ms *MongoSync) getCollInput(ctx context.Context, collData *CollData) Oplog
 				totalBytes = lenOp
 				// opLogDrop flushed immediately
 				log.Tracef("coll %s flushOnIdle on opLogDrop", collName)
-				flush("opLogDrop")
+				flush(false)
 				continue
 			case OpLogUnknown: // ignore op
 				log.Warnf("Operation of unknown type left unhandled:%+v", op)
@@ -112,20 +131,13 @@ func (ms *MongoSync) getCollInput(ctx context.Context, collData *CollData) Oplog
 			totalBytes += len(op)
 			if totalBytes >= maxBatch {
 				log.Tracef("coll %s flush on bulk size %d >= %d(%d)", collName, totalBytes, maxBatch, len(models))
-				flush(fmt.Sprintf("%d > maxBatch %d", totalBytes+len(op), maxBatch))
+				flush(false)
 			}
 
 			if len(models) == 1 {
-				// we just put 1st item, set timer to flushOnIdle after maxFlushDelay
+				ms.ChangeColl <- ChangeColl{CollName: collName, SyncId: getSyncId(op)}
+				// we just put 1st item
 				// unless it is filled up to (max)maxBatch items
-				timer = time.AfterFunc(flushDelay, func() {
-					collData.RLock()
-					if collData.Input != nil {
-						log.Tracef("flush %s on timer %v", collName, flushDelay)
-						CancelSend(ctx, collData.Input, nil) // flush on timer
-					}
-					collData.RUnlock()
-				})
 				log.Tracef("coll %s become collUpdate on op %s", collName, getOpName(op))
 			}
 		}

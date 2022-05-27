@@ -11,20 +11,13 @@ type (
 	CollData struct {
 		CollName     string
 		Config       *config.DataSync
-		OplogClass   OplogClass   // class of collection
-		Input        Oplog        // dedicated channel for handling input for this collection
-		Dirty        int          // counter for dirty bytes still not sent
-		Updated      time.Time    // since when buffer became dirty
-		LastSyncId   string       // latest syncId for this collection
-		PrevBookmark SyncBookmark // latest bookmark. before writing new - delete it
-		FlushAfter   time.Time
-		Flushed      time.Time // when it was flushed last time
-		SyncId       string    // latest known syncId for the collection which should be written
-		// counters for writing,
-		// OpLogunordered can be sent without respecting this,
-		// otherwise should wait zero
-		WriteQueue int           // how many bulkwrites queue
-		WQClean    chan struct{} // bulkwrite signals to waiter that Write Queue is clean (if it is not zero)
+		OplogClass   OplogClass // class of collection
+		Input        Oplog      // dedicated channel for handling input for this collection
+		Updated      time.Time  // since when buffer became dirty
+		LastSyncId   string     // latest syncId for this collection
+		SyncId       string     // latest known syncId for the collection which should be written
+		flushTimer   *time.Timer
+		flushTimerOn chan bool
 		sync.RWMutex
 	}
 	CollMatch func(coll string) *CollData
@@ -64,6 +57,9 @@ func (ms *MongoSync) getCollData(collName string) *CollData {
 	} else {
 		cdata.OplogClass = OplogStored
 	}
+	cdata.flushTimerOn = make(chan bool, 1)
+	cdata.flushTimerOn <- false // init flushTimer state
+	cdata.flushTimer = &time.Timer{}
 	ms.collDataMutex.Lock()
 	ms.collData[collName] = cdata
 	ms.collDataMutex.Unlock()

@@ -96,7 +96,7 @@ func (ms *MongoSync) getCollBookMarks(ctx context.Context) (collBookmark map[str
 	return
 }
 
-func (ms *MongoSync) updateCollBookmarks(ctx context.Context, collBookmark map[string]string) (updated bool, startSyncId string) {
+func (ms *MongoSync) updateCollBookmarks(ctx context.Context, collBookmark map[string]string) (updated bool, minSyncId, maxSyncId string) {
 	// now sort SyncIds
 	if len(collBookmark) == 0 {
 		return
@@ -106,13 +106,14 @@ func (ms *MongoSync) updateCollBookmarks(ctx context.Context, collBookmark map[s
 		syncId2Colls[bm] = append(syncId2Colls[bm], coll)
 	}
 	syncIds := maps.Keys(syncId2Colls)
+	maxSyncId = syncIds[len(syncIds)-1]
 	// sort them by ascending
 	sort.Strings(syncIds)
 	start := -1
 	for i, syncId := range syncIds {
 		if _, err := getChangeStream(ctx, ms.Sender, syncId); err == nil {
 			start = i
-			startSyncId = syncId
+			minSyncId = syncId
 			break
 		}
 	}

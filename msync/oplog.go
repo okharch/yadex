@@ -6,7 +6,6 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"sync"
 )
 
 type OplogClass int
@@ -55,21 +54,12 @@ func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId st
 					log.Tracef("leaving oplog %s due cancelled context ", ocName[oplogClass])
 					return
 				}
-				//SendState(ms.OplogIdle[oplogClass], true)
-				onIdleCtx, onIdleCancel := context.WithCancel(ctx)
-				ms.routines.Add(1) // flushOnIdle
-				var waitIdle sync.WaitGroup
-				waitIdle.Add(1)
-				go func() {
-					ms.flushOnIdle(onIdleCtx, oplogClass)
-					ms.routines.Done() // flushOnIdle
-					waitIdle.Done()
-				}()
+				// send nil to the channel before idling/sleep,
+				// it will flush the changes from the last collection
+				ch <- nil
 
 				log.Infof("getOplog %s: idle", ocName[oplogClass])
 				next = changeStream.Next(ctx)
-				onIdleCancel()
-				waitIdle.Wait()
 				log.Infof("getOplog %s: run %s", ocName[oplogClass], getOpColl(changeStream.Current))
 			}
 			err := changeStream.Err()
@@ -84,22 +74,4 @@ func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId st
 		}
 	}()
 	return ch, nil
-}
-
-func (ms *MongoSync) getSyncIdOplog(ctx context.Context) (syncId chan string, cancel context.CancelFunc) {
-	syncId = make(chan string, 1)
-	var eCtx context.Context
-	eCtx, cancel = context.WithCancel(ctx)
-	oplog, err := ms.getOplog(eCtx, ms.Sender, "", OplogSyncId)
-	if err != nil {
-		log.Fatalf("failed to get oplog, perhaps it is not activated: %s", err)
-	}
-	ms.routines.Add(1) // SyncId channel
-	go func() {
-		for op := range oplog {
-			SendState(syncId, getSyncId(op))
-		}
-		ms.routines.Done() // SyncId channel
-	}()
-	return
 }

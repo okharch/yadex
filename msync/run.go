@@ -85,11 +85,6 @@ func (ms *MongoSync) Run(ctx context.Context) {
 func (ms *MongoSync) runSync(ctx context.Context) {
 	// you can count this using
 	// git grep ms.routines.|grep -v _test|grep -v SyncCollections|grep -v  getOplog|grep -v runSToplog
-	//ms.routines.Add(1)
-	//go ms.runStatus(ctx)
-	//go ms.flushOnTimer(ctx)
-	//go ms.showSpeed(ctx) // optional, comment out if not needed
-	// show avg speed of BulkWrite ops to the log
 	log.Tracef("runSync running servers")
 	if len(ms.Config.RT) > 0 {
 		ms.routines.Add(2) // runBulkWriteRT, runRToplog
@@ -97,7 +92,8 @@ func (ms *MongoSync) runSync(ctx context.Context) {
 		go ms.runRToplog(ctx)
 	}
 	if len(ms.Config.ST) > 0 {
-		ms.routines.Add(2) // runBulkWriteST, runSToplog
+		ms.routines.Add(3) // runBulkWriteST, runSToplog, runChangeColl
+		go ms.runChangeColl(ctx)
 		go ms.runBulkWriteST(ctx)
 		go ms.runSToplog(ctx)
 	}
@@ -141,38 +137,55 @@ func (ms *MongoSync) runRToplog(ctx context.Context) {
 func (ms *MongoSync) runSToplog(ctx context.Context) {
 	defer ms.routines.Done() // runSToplog
 	log.Trace("runSToplog: SyncCollections")
-	collSyncId, minSyncId, minTime, maxTime := ms.SyncCollections(ctx)
+	collSyncId, minSyncId, maxSyncId := ms.SyncCollections(ctx)
 	if ctx.Err() != nil {
 		return
 	}
 	// find out minimal start
 	log.Trace("runSToplog: getOplog")
 	oplog, err := ms.getOplog(ctx, ms.Sender, minSyncId, OplogStored)
-	log.Infof("ST oplog started from %v, target => %v exchange %s", minTime.Time(), maxTime.Time(), ms.Name())
+	log.Infof("ST oplog started exchange %s from %s", ms.Name(), minSyncId)
 	if err != nil {
 		log.Fatalf("failed to restore oplog for ST ops: %s", err)
 	}
-	// loop until context tells we are done
-	bmExists := len(collSyncId) > 0
+	// if BookmarksCounts we consider bookmarks and maxSyncId before starting syncing all the collections
+	BookmarksCounts := len(collSyncId) > 0
 	lastColl := &CollData{}
+	// flushLastColl sends nil to the collection input channel.
+	// this sets up timer which flushes collection content and
+	// tries to close the input channel for the collection
+	flushLastColl := func() {
+		if lastColl.flushTimer == nil {
+			return
+		}
+		lastColl.flushTimer.Stop()
+		<-lastColl.flushTimerOn // to reset previous timer
+		if lastColl.Input != nil {
+			lastColl.Input <- nil // this will set postponed(timer) flush
+		}
+		lastColl.flushTimerOn <- false // to reset previous timer
+	}
 	for op := range oplog {
 		// we deal with the same db all the time,
 		// it is enough to dispatch based on collName only
+		if op == nil && len(oplog) == 0 {
+			flushLastColl() // triggered before oplog becomes idling
+			continue
+		}
+		if BookmarksCounts {
+			syncId := getSyncId(op)
+			if syncId > maxSyncId {
+				BookmarksCounts = false
+			} else if syncId < maxSyncId {
+				collName := getOpColl(op)
+				if startFrom, ok := collSyncId[collName]; !ok || syncId < startFrom {
+					continue
+				}
+			}
+		}
 		collName := getOpColl(op)
 		if collName == "" {
 			continue
-		}
-		if bmExists {
-			startAfter, ok := collSyncId[collName]
-			if ok {
-				syncId := getSyncId(op)
-				if syncId <= startAfter.SyncId {
-					//log.Tracef("skipping %s due %s <= %s", collName, syncId, startAfter.SyncId)
-					continue
-				}
-				delete(collSyncId, collName)
-				bmExists = len(collSyncId) > 0
-			}
 		}
 		// check if it is subject to sync
 		if lastColl.CollName != collName {
@@ -180,9 +193,18 @@ func (ms *MongoSync) runSToplog(ctx context.Context) {
 			if curColl.Config == nil || curColl.OplogClass != OplogStored {
 				continue
 			}
+			flushLastColl() // triggered by changing to different collection
 			lastColl = curColl
+			// make sure to reset flushTimer and
+			// restore input channel before proceed
+			// it is the only place where Input is set
+			lastColl.flushTimer.Stop()
+			<-lastColl.flushTimerOn // to reset previous timer
+			if lastColl.Input == nil {
+				lastColl.Input = ms.getCollInput(ctx, lastColl)
+			}
+			lastColl.flushTimerOn <- false // to reset previous timer
 		}
-		ms.UpdateDirty(ctx, lastColl, len(op), op)
 		lastColl.Input <- op
 	}
 }

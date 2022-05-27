@@ -9,10 +9,11 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"yadex/logger"
 )
 
 func TestMakeWatchConfigChannel(t *testing.T) {
-	SetLogger(log.TraceLevel, "")
+	logger.SetLogger(log.TraceLevel, "")
 	c := &Config{
 		Exchanges: []*ExchangeConfig{
 			{

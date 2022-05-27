@@ -104,7 +104,6 @@ func (ms *MongoSync) BulkWriteOp(ctx context.Context, bwOp *BulkWriteOp) {
 			log.Tracef("BulkWriteOp: BulkWrite %s: %+v", bwOp.Name(), r)
 		}
 	}
-	ms.UpdateDirty(ctx, bwOp.CollData, -bwOp.TotalBytes, nil)
 	// update SyncId for the ST data
 	if bwOp.OplogClass == OplogStored && bwOp.SyncId != "" {
 		ms.WriteCollBookmark(ctx, bwOp.CollData, bwOp.SyncId)

@@ -24,7 +24,8 @@ func (ms *MongoSync) initSync(_ context.Context) error {
 	// init channels before serving routines
 	ms.bulkWriteST = make(chan *BulkWriteOp, 1)
 	ms.bulkWriteRT = make(chan *BulkWriteOp, 1)
-	ms.pending = make(map[string]*CollData)
+	ms.Pending = make(chan map[string]string)
+	ms.ChangeColl = make(chan ChangeColl)
 	// get name of bookmarkColSyncid on sender
 	log.Tracef("initSync")
 	return nil
