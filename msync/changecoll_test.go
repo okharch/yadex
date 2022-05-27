@@ -7,7 +7,7 @@ import (
 )
 
 func TestChangeColl(t *testing.T) {
-	ms := &MongoSync{ChangeColl: make(chan ChangeColl), Pending: make(chan map[string]string)}
+	ms := &MongoSync{ChangeColl: make(chan ChangeColl), Pending: make(chan map[string]string), IsClean: make(chan bool, 1)}
 	ctx := context.TODO()
 	ms.routines.Add(1)
 	go ms.runChangeColl(ctx)
@@ -15,12 +15,14 @@ func TestChangeColl(t *testing.T) {
 	ms.ChangeColl <- ChangeColl{CollName: "t2", SyncId: "2"}
 	ms.ChangeColl <- ChangeColl{CollName: "t3", SyncId: "3"}
 	ms.ChangeColl <- ChangeColl{CollName: "t1", SyncId: "4"}
+	require.False(t, GetState(ms.IsClean))
 
 	ms.ChangeColl <- ChangeColl{CollName: "t1", SyncId: "4", BulkWrite: true}
 	pending := <-ms.Pending
 	require.Equal(t, 2, len(pending))
 	require.Equal(t, "2", pending["t2"])
 	require.Equal(t, "3", pending["t3"])
+	require.False(t, GetState(ms.IsClean))
 
 	ms.ChangeColl <- ChangeColl{CollName: "t3", SyncId: "5"}
 
@@ -29,6 +31,7 @@ func TestChangeColl(t *testing.T) {
 	require.Equal(t, 2, len(pending))
 	require.Equal(t, "2", pending["t2"])
 	require.Equal(t, "3", pending["t3"])
+	require.False(t, GetState(ms.IsClean))
 
 	ms.ChangeColl <- ChangeColl{CollName: "t3", SyncId: "5", BulkWrite: true}
 	pending = <-ms.Pending
@@ -38,4 +41,5 @@ func TestChangeColl(t *testing.T) {
 	ms.ChangeColl <- ChangeColl{CollName: "t2", SyncId: "2", BulkWrite: true}
 	pending = <-ms.Pending
 	require.Equal(t, 0, len(pending))
+	require.True(t, GetState(ms.IsClean))
 }

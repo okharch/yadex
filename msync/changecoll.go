@@ -20,38 +20,43 @@ type (
 func (ms *MongoSync) runChangeColl(ctx context.Context) {
 	defer ms.routines.Done()
 	var head, tail *CollSyncIdList
+	clean := true
 	for cc := range ms.ChangeColl {
 		if ctx.Err() != nil {
 			return
 		}
 		if cc.BulkWrite {
-			// we should erase all the entries with the same CollName at left and
-			// return to the pending channel names and syncId for the other collection at left
+			// we should remove all the entries with the same CollName at left and
+			// return to the pending channel names and syncId for the other collections at left
 			pending := make(map[string]string)
 			prev := head
-			for cur := head; cur != nil && cur.SyncId <= cc.SyncId; cur = cur.Next {
-				if cur.CollName == cc.CollName {
+			for current := head; current != nil && current.SyncId <= cc.SyncId; current = current.Next {
+				if current.CollName == cc.CollName {
 					// have to remove cur from list
-					if head == cur {
+					if head == current {
 						// we are at the head yet, remove it
-						head = cur.Next
+						head = current.Next
 						if head == nil {
 							// we have the only element, remove it
 							tail = nil
+							if !clean {
+								clean = true
+								SendState(ms.IsClean, clean)
+							}
 						} else {
 							prev = head
 						}
 					} else {
 						// remove current
-						prev.Next = cur.Next
+						prev.Next = current.Next
 					}
 				} else {
 					// need to add CollName to pending if it is not already there
-					_, ok := pending[cur.CollName]
+					_, ok := pending[current.CollName]
 					if !ok {
-						pending[cur.CollName] = cur.SyncId
+						pending[current.CollName] = current.SyncId
 					}
-					prev = cur
+					prev = current
 				}
 			}
 			ms.Pending <- pending
@@ -64,6 +69,10 @@ func (ms *MongoSync) runChangeColl(ctx context.Context) {
 				tail.Next = newElem
 			}
 			tail = newElem
+			if clean {
+				clean = false
+				SendState(ms.IsClean, clean)
+			}
 		}
 	} // for cc := range ms.ChangeColl
 }
