@@ -46,29 +46,3 @@ func TestIdIncrement(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, id1, ir.InsertedID)
 }
-
-func TestNewBookmarkId(t *testing.T) {
-	ms := &MongoSync{}
-	id := ms.getNewBookmarkId()
-	for i := 0; i < 50; i++ {
-		prevId := id
-		id = ms.getNewBookmarkId()
-		require.NotEqual(t, prevId, id)
-	}
-	time.Sleep(3 * time.Millisecond)
-	prevId := id
-	id = ms.getNewBookmarkId()
-	require.NotEqual(t, prevId, id)
-	require.NotZero(t, ms.lastBookmarkInc)
-	// id still is more than time
-	require.Greater(t, int(id-primitive.NewDateTimeFromTime(time.Now())), 0)
-	// now wait enough so time becomes more than most late id
-	time.Sleep(100 * time.Millisecond)
-	prevId = id
-	id = ms.getNewBookmarkId()
-	// it should be time.Now()
-	require.LessOrEqual(t, 0, int(id-primitive.NewDateTimeFromTime(time.Now())))
-	require.NotEqual(t, prevId, id)
-	require.Zero(t, ms.lastBookmarkInc)
-	require.Equal(t, ms.lastBookmarkId, id)
-}
