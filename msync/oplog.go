@@ -18,14 +18,16 @@ const (
 
 var ocName = [3]string{"RT", "ST", "SyncId"}
 
-// getChangeStream tries to resume sync from last successfully committed SyncId.
+// GetChangeStream tries to resume sync from last successfully committed SyncId.
 // That id is stored for each mongo collection each time after successful write oplogST into receiver database.
-func getChangeStream(ctx context.Context, sender *mongo.Database, syncId string) (changeStream *mongo.ChangeStream, err error) {
+func GetChangeStream(ctx context.Context, sender *mongo.Database, syncId string) (changeStream *mongo.ChangeStream, err error) {
 	// add option so mongo provides FullDocument for update event
 	opts := options.ChangeStream().SetFullDocument(options.UpdateLookup)
 	if syncId != "" {
 		resumeToken := &bson.M{"_data": syncId}
 		opts.SetResumeAfter(resumeToken)
+		//ts := primitive.Timestamp{}
+		//opts.SetStartAtOperationTime(&ts)
 	}
 	var pipeline mongo.Pipeline
 	// start watching oplogST before cloning collections
@@ -35,7 +37,7 @@ func getChangeStream(ctx context.Context, sender *mongo.Database, syncId string)
 // provides oplog from changeStream,
 func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId string, oplogClass OplogClass) (Oplog,
 	error) {
-	changeStream, err := getChangeStream(ctx, db, syncId)
+	changeStream, err := GetChangeStream(ctx, db, syncId)
 	if err != nil {
 		return nil, err
 	}
@@ -47,6 +49,7 @@ func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId st
 			ms.routines.Done() // getOplog
 			close(ch)
 		}()
+		previous := false
 		for {
 			next := changeStream.TryNext(ctx)
 			if !next {
@@ -56,20 +59,24 @@ func (ms *MongoSync) getOplog(ctx context.Context, db *mongo.Database, syncId st
 				}
 				// send nil to the channel before idling/sleep,
 				// it will flush the changes from the last collection
-				ch <- nil
+				if previous {
+					ch <- nil
+				}
 
 				log.Infof("getOplog %s: idle", ocName[oplogClass])
 				next = changeStream.Next(ctx)
 				log.Infof("getOplog %s: run %s", ocName[oplogClass], getOpColl(changeStream.Current))
+			}
+			if next {
+				ch <- changeStream.Current
+				previous = true
+				continue
 			}
 			err := changeStream.Err()
 			if err != nil {
 				// TODO: try to handle oplog lost tail error
 				log.Errorf("failed to get %s oplog entry: %s", ocName[oplogClass], err)
 				return
-			}
-			if next {
-				ch <- changeStream.Current
 			}
 		}
 	}()

@@ -5,6 +5,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
 	"sync"
 	"testing"
 	"time"
@@ -18,28 +19,40 @@ func TestGetOplog(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.TODO())
 	log.Infof("getting oplog for %s", ms.Name())
 	opCh, err := ms.getOplog(ctx, ms.Sender, "", OplogStored)
+	require.NoError(t, err)
+	require.NotNil(t, opCh)
 	var input sync.WaitGroup
 	input.Add(1)
-	var op bson.Raw
+	var lastOp bson.Raw
 	go func() {
 		log.Info("getting OpCh")
-		op = <-opCh
-		db, collName := getNS(op)
-		log.Infof("got OpCh %s.%s %s", db, collName, getSyncId(op))
+		for op := range opCh {
+			if op == nil {
+				break
+			}
+			lastOp = op
+			db, collName := getNS(op)
+			log.Infof("op entry: %+v", getMap(op))
+			log.Infof("got OpCh %s.%s %+v", db, collName, getTS(op))
+		}
 		input.Done()
 	}()
 	timeout := time.Duration(time.Second)
 	log.Infof("sleep %v", timeout)
 	time.Sleep(timeout)
 	log.Info("insert into test table")
-	ir, err := ms.Sender.Collection("test").InsertOne(ctx, bson.D{})
-	require.NoError(t, err)
+	var ir *mongo.InsertOneResult
+	for i := 0; i < 10; i++ {
+		ir, err = ms.Sender.Collection("test").InsertOne(ctx, bson.D{})
+		require.NoError(t, err)
+		time.Sleep(time.Millisecond * 200)
+	}
 	input.Wait()
-	require.NotNil(t, op)
-	opType := op.Lookup("operationType")
+	require.NotNil(t, lastOp)
+	opType := lastOp.Lookup("operationType")
 	require.NotNil(t, opType)
 	require.Equal(t, "insert", opType.StringValue())
-	id := op.Lookup("fullDocument", "_id")
+	id := lastOp.Lookup("fullDocument", "_id")
 	require.NotNil(t, id)
 	oid := id.ObjectID()
 	require.Equal(t, ir.InsertedID, oid)

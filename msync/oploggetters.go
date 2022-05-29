@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"sync"
 	"testing"
@@ -19,6 +20,17 @@ func getNS(op bson.Raw) (db, coll string) {
 	db = d.Lookup("db").StringValue()
 	coll = d.Lookup("coll").StringValue()
 	return
+}
+
+func getMap(op bson.Raw) bson.M {
+	var result bson.M
+	_ = bson.Unmarshal(op, &result)
+	return result
+}
+
+func getTS(op bson.Raw) primitive.Timestamp {
+	t, i := op.Lookup("clusterTime").Timestamp()
+	return primitive.Timestamp{T: t, I: i}
 }
 
 func getOpColl(op bson.Raw) string {
