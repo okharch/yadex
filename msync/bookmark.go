@@ -111,7 +111,7 @@ func (ms *MongoSync) updateCollBookmarks(ctx context.Context, collBookmark map[s
 	sort.Strings(syncIds)
 	start := -1
 	for i, syncId := range syncIds {
-		if _, err := getChangeStream(ctx, ms.Sender, syncId); err == nil {
+		if _, err := GetChangeStream(ctx, ms.Sender, syncId); err == nil {
 			start = i
 			minSyncId = syncId
 			break
