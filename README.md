@@ -1,25 +1,72 @@
-# yadex
-yet another data exchange (mongodb, go, oplog sync dbs)
-Keep it
+# ⚡ yadex — Yet Another Data EXchange
 
-* Simple
-* Fast
-* Robust
+A **lightweight, real-time + historical MongoDB sync** engine written in Go.  
+Originally built as a proof-of-concept after 6 years of overengineering by others — completed in just **1 month** with clarity and purpose.
 
-And have fun!
+> ✅ Simple — 💨 Fast — 🧱 Robust — 🧠 Smart
 
-## Algorithm
-The idea of this service is to propagate data changes from a sender to a receiver MongoDB server.
-All the data in a database is split into two type of sets: RT data (Realtime data) and ST (Historical Data).
-It supposes that changes could be made at both the sender and the receiver. 
+---
 
-The class of data defines the way it is synced:
-* RT sync is triggered by latest [oplog](https://www.mongodb.com/docs/manual/core/replica-set-oplog/) events on RT data update. RT data has an expiration date. If it is expired it will not be sent to the receiver.
-It still waits and collects a Bulk of RT updates some RT_DELAY or until MAX_RT_BULK_SIZE achieved before flushing changes into receiver. 
-If it fails to flush those Bulk into Receiver - the changes are dropped.
-* ST sync tries hard to make sender's and receiver's ST data as equal as it gets. At the beggining it checks what ST collections has been synced before and it it sees oplog is still tracks them it skips cloning. Otherwise it clones all the records from sender to the receiver that are not already there. Then it follows oplog changes to replicate evry changes from sender to the receiver. It is intented to work 24/7 as oplog is capped collections and if it can't restore some collections changes from oplog they could be lost.
-* It maintains latest written bookmarks for ST data, so each time when it needs to resume syncing it starts from that bookmark if it can. If it can't, it tries to insert all the documents from collection unordered.
+## ✨ Why It Exists
 
-Other features:
-* The split to RT/ST is implemented by yaml config file
-* It can be dropped and resumed without losses as long as oplog is not capped. Even in that case it will catch up as long as there were not conflicting changes on the receiver side
+This repository showcases **how things should be implemented**:  
+Without bloated queue managers, without unnecessary RabbitMQ hops, and without overcomplicating the architecture.  
+
+Despite my preference for **relational databases**, I’ve worked extensively with MongoDB.  
+This project demonstrates:
+- My ability to **learn and master unfamiliar tech quickly**
+- A **production-grade solution** using the **MongoDB oplog**
+- A clear replacement for fragile legacy sync solutions
+
+---
+
+## 🔁 Sync Logic Overview
+
+MongoDB data is split into two categories:
+
+- 🟢 **RT (Real-Time) Data** — recent, high-frequency updates
+- 🔵 **ST (Stable/Historical) Data** — bulk historical records
+
+Each class follows its own syncing strategy:
+
+### 🟢 Real-Time (RT) Sync
+- 📰 Listens to MongoDB [oplog](https://www.mongodb.com/docs/manual/core/replica-set-oplog/)
+- 📦 Collects changes into a bulk (up to `MAX_RT_BULK_SIZE` or after `RT_DELAY`)
+- 🚫 If flushing to the receiver fails — the changes are dropped (stateless & efficient)
+- ⏳ Expired data is ignored
+
+### 🔵 Historical (ST) Sync
+- 🔍 First checks whether a collection has already been cloned
+- 📦 If not, it clones all documents from sender → receiver
+- 🧠 After cloning, follows oplog to track future changes
+- 🕐 Keeps bookmarks for resumable sync
+- 🧹 If bookmarks are missing or expired, performs unordered insert of all documents
+
+---
+
+## ⚙️ Features
+
+- 🧾 YAML-based config defines RT vs ST collections
+- 🔄 Drop & resume anytime (as long as oplog isn’t capped)
+- 📉 Gracefully degrades if oplog is unavailable
+- 🔐 Assumes minimal conflicts on the receiver
+
+---
+
+## 📦 Repo Highlights
+
+- ✅ Clean architecture with minimal dependencies
+- 🧪 Easy to understand & extend
+- 🔥 Proven in a real-world scenario that others failed to solve
+
+---
+
+## 🧠 TL;DR
+
+> “Keep it simple. Focus on correctness. Avoid Rabbit holes 🐇.”
+
+For details, see the source code and config examples.
+
+---
+
+Made with ☕ and ❤️ by [okharch](https://github.com/okharch)
